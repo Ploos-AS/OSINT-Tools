@@ -1,37 +1,26 @@
 # OSINT Tools
 
-Self-hosted, open-source OSINT workbench inspired by the simplicity of IT-Tools.
+Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-## M0 goals
+**M1 Core Passive OSINT** provides target detection, DNS, RDAP, IP classification, HTTP header inspection, TLS certificate inspection and mail-domain (MX/SPF/DMARC) analysis through a small JSON API.
 
-- One OCI image for Docker and Podman
-- amd64 + arm64 ready
-- non-root/rootless friendly
-- passive OSINT first
-- useful without API keys
-- persistent application data only under `/data`
-- SQLite first; PostgreSQL later
-- no Docker socket dependency
-- foundation for cases, targets, artifacts, relationships, notes and pivots
-
-## Quick start
-
-### Docker / Docker Compose
+## Run with Docker or Podman
 
 ```sh
-docker compose up --build -d
-curl -fsS http://localhost:8080/healthz
+docker compose up --build
+# or
+podman compose up --build
 ```
 
-### Podman
+Open `http://localhost:8080/healthz` and `http://localhost:8080/api/v1/info`.
+
+Example:
 
 ```sh
-podman build -t osint-tools:dev .
-podman run --rm -p 8080:8080 -v osint-tools-data:/data:Z osint-tools:dev
+curl 'http://localhost:8080/api/v1/dns?domain=example.com'
+curl 'http://localhost:8080/api/v1/tls?host=example.com'
 ```
 
-A Podman Quadlet example is in `deploy/quadlet/osint-tools.container`.
+The same OCI image is intended for Docker and Podman, amd64 and arm64, and runs as a non-root user. Persistent application data lives under `/data`.
 
-## M0 status
-
-M0 is deliberately small: it proves packaging/runtime portability and establishes the project contract. Functional OSINT modules begin in M1.
+See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.

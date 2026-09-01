@@ -1,19 +1,8 @@
 # Roadmap
 
-## M0 Foundation
-OCI packaging, Docker + Podman, rootless/non-root baseline, health API and project contract.
-
-## M1 Passive core
-DNS, RDAP, TLS certificate inspection, certificate-transparency lookup adapter, HTTP/header and URL analysis, identifiers and local transforms.
-
-## M2 Cases and pivots
-Cases, targets, observations, artifacts, relationships, notes, provenance and pivot graph.
-
-## M3 Providers
-Optional provider adapters such as Shodan, Censys and VirusTotal where their APIs and terms permit; credentials remain server-side.
-
-## M4 File and image intelligence
-Non-executing metadata extraction, hashes, MIME/magic, archive listing, EXIF/geotags and perceptual hashes.
-
-## M5 Release hardening
-Import/export, audit/provenance UX, limits, documentation, multi-arch publishing and stable release packaging.
+- **M0 Foundation — complete:** OCI-native container, Docker/Podman deployment, non-root runtime, `/data`, health API and tests.
+- **M1 Core Passive OSINT — complete:** target detection, DNS, RDAP, IP classification, HTTP/TLS inspection and mail-domain analysis.
+- **M2 Case & Pivot Engine:** cases, targets, observations, artifacts, relationships, notes, provenance and pivots.
+- **M3 Providers:** optional server-side adapters for external OSINT services; useful without API keys remains a requirement.
+- **M4 File/Image Intelligence:** safe non-executing metadata, hashes, archives, EXIF and perceptual hashes.
+- **M5 Release & Polish:** richer web UI, exports, documentation, packaging, security review and release qualification.
