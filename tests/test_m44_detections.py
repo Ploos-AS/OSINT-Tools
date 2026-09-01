@@ -120,5 +120,5 @@ def test_schema_five_migrates_to_six(tmp_path):
         conn.execute("UPDATE schema_meta SET value='5' WHERE key='schema_version'")
     migrated=Store(path); assert migrated.get_case(case["id"])["name"]=="preserved"
     with migrated.connect() as conn:
-        assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]=="6"
+        assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0]=="7"
         assert conn.execute("SELECT name FROM sqlite_master WHERE name='file_detections'").fetchone()

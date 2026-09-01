@@ -37,9 +37,26 @@ services:
       OSINT_TOOLS_HASHSET_MAX_BYTES: "${OSINT_TOOLS_HASHSET_MAX_BYTES:-4194304}"
       OSINT_TOOLS_HASHSET_MAX_ENTRIES: "${OSINT_TOOLS_HASHSET_MAX_ENTRIES:-100000}"
       OSINT_TOOLS_SIMILAR_MAX_RESULTS: "${OSINT_TOOLS_SIMILAR_MAX_RESULTS:-100}"
+      OSINT_TOOLS_AV_SCAN_ON_UPLOAD: "${OSINT_TOOLS_AV_SCAN_ON_UPLOAD:-false}"
+      OSINT_TOOLS_CLAMAV_ENABLED: "${OSINT_TOOLS_CLAMAV_ENABLED:-false}"
+      OSINT_TOOLS_CLAMAV_HOST: "${OSINT_TOOLS_CLAMAV_HOST:-clamav}"
+      OSINT_TOOLS_CLAMAV_PORT: "${OSINT_TOOLS_CLAMAV_PORT:-3310}"
+      OSINT_TOOLS_CLAMAV_TIMEOUT_SECONDS: "${OSINT_TOOLS_CLAMAV_TIMEOUT_SECONDS:-15}"
+      OSINT_TOOLS_CLAMAV_MAX_RESPONSE_BYTES: "${OSINT_TOOLS_CLAMAV_MAX_RESPONSE_BYTES:-4096}"
+      OSINT_TOOLS_AV_MAX_ENGINES: "${OSINT_TOOLS_AV_MAX_ENGINES:-4}"
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
 
+  clamav:
+    image: clamav/clamav:1.4.3
+    profiles: ["av"]
+    expose:
+      - "3310"
+    volumes:
+      - clamav-db:/var/lib/clamav
+    restart: unless-stopped
+
 volumes:
   osint-tools-data:
+  clamav-db:

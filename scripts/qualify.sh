@@ -18,6 +18,25 @@ run_gate() {
     if "$@"; then record "$name" PASS ""; else record "$name" FAIL "command failed"; fi
 }
 
+# Keep runtime failures diagnosable without dumping arbitrary response data.
+dump_http_response() {
+    label=$1
+    file=$2
+    printf '%s actual response (bounded): ' "$label" >&2
+    python - "$file" <<'PY' 2>/dev/null || true
+import json, pathlib, sys
+try:
+    raw = pathlib.Path(sys.argv[1]).read_bytes()[:8192]
+except Exception:
+    print("<unavailable>")
+    raise SystemExit
+try:
+    print(json.dumps(json.loads(raw), sort_keys=True)[:8192])
+except Exception:
+    print(raw.decode("utf-8", "replace")[:8192])
+PY
+}
+
 run_gate "Python tests" python -m pytest -v
 run_gate "git diff --check" git diff --check
 
@@ -57,6 +76,10 @@ run_gate "known hash/import/provenance" python -m pytest -q tests/test_m44_detec
 run_gate "similarity fingerprint/search" python -m pytest -q tests/test_m44_detections.py -k similarity
 run_gate "detection reanalysis/idempotency" python -m pytest -q tests/test_m44_detections.py -k reanalysis
 run_gate "archive-child detection" python -m pytest -q tests/test_m44_detections.py -k archive_child
+run_gate "AV registry" python -m pytest -q tests/test_av.py
+run_gate "ClamAV protocol" python -m pytest -q tests/test_av.py -k 'ping or detected or normalized'
+run_gate "ClamAV unavailable/failure isolation" python -m pytest -q tests/test_av.py -k 'disabled or persistence'
+run_gate "scan-on-upload/archive policy" python -m pytest -q tests/test_av_policy.py
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
@@ -93,7 +116,7 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.4.4" and i["milestone"] == "M4.4" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.4.5" and i["milestone"] == "M4.5" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
@@ -104,6 +127,16 @@ PY
     target_id=$(printf '%s' "$target_json" | python -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])') || api_ok=0
     curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$target_id/pivot/dns" >"$tmp_dir/pivot.json" || api_ok=0
     [ "$api_ok" -eq 1 ] && record "M2 regression" PASS "" || record "M2 regression" FAIL "representative case/target/DNS pivot failed"
+
+    av_ok=1
+    curl -fsS "$base/api/v1/av/engines" >"$tmp_dir/av-engines.json" || av_ok=0
+    code=$(curl -sS -o "$tmp_dir/av-scan.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{"engines":["clamav"],"host":"127.0.0.1","port":1}' "$base/api/v1/files/999/av/scan" || true)
+    python - "$tmp_dir/av-engines.json" <<'PY' || av_ok=0
+import json,sys
+items=json.load(open(sys.argv[1]))["result"]
+assert any(item["id"]=="clamav" and item["enabled"] is False for item in items)
+PY
+    [ "$av_ok" -eq 1 ] && record "AV disabled behavior" PASS "" || record "AV disabled behavior" FAIL "optional AV status contract failed"
 
     provider_ok=1
     code=$(curl -sS -o "$tmp_dir/provider-error.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$target_id/providers/ipinfo/lookup") || provider_ok=0
@@ -315,9 +348,125 @@ else
     record "M4.2 structured runtime" SKIPPED "Docker runtime was not available"
     record "M4.3 binary runtime" SKIPPED "Docker runtime was not available"
     record "M4.4 detection runtime" SKIPPED "Docker runtime was not available"
+    record "AV disabled behavior" SKIPPED "Docker runtime was not available"
     record "persistence" SKIPPED "Docker runtime was not available"
 fi
 [ -z "${OSINT_TOOLS_PORT_PUBLISHED+x}" ] || docker compose -p "$docker_project" down -v >/dev/null 2>&1 || true
+
+av_project="osint-tools-av-qualify-$$"
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    export OSINT_TOOLS_PORT_PUBLISHED=$((19090 + ($$ % 1000))) OSINT_TOOLS_CLAMAV_ENABLED=true OSINT_TOOLS_AV_SCAN_ON_UPLOAD=false
+    if docker compose -p "$av_project" --profile av build osint-tools >/dev/null && docker compose -p "$av_project" --profile av up -d >/dev/null; then
+        av_ready=0; i=0
+        while [ "$i" -lt 90 ]; do
+            if curl -fsS "http://127.0.0.1:$OSINT_TOOLS_PORT_PUBLISHED/healthz" >/dev/null 2>&1 && docker compose -p "$av_project" exec -T osint-tools python -c 'import socket; s=socket.create_connection(("clamav",3310),2); s.sendall(b"PING\n"); assert s.recv(64).strip()==b"PONG"; s.close()' >/dev/null 2>&1; then av_ready=1; break; fi
+            i=$((i+1)); sleep 1
+        done
+        if [ "$av_ready" -eq 1 ]; then
+            record "ClamAV readiness" PASS ""
+            avbase="http://127.0.0.1:$OSINT_TOOLS_PORT_PUBLISHED"; avtmp=$(mktemp -d); av_ok=1; av_diag_failed=0
+            docker compose -p "$av_project" exec -T osint-tools sh -c 'printf "AV config enabled=%s host=%s port=%s\\n" "$OSINT_TOOLS_CLAMAV_ENABLED" "$OSINT_TOOLS_CLAMAV_HOST" "$OSINT_TOOLS_CLAMAV_PORT"' >&2 || true
+            docker compose -p "$av_project" exec -T osint-tools python -c 'import socket; s=socket.create_connection(("clamav",3310),5); s.sendall(b"VERSION\n"); print("clamd VERSION:",repr(s.recv(1024))); s.close()' >&2 || true
+            avcase=$(curl -fsS -H 'Content-Type: application/json' -d '{"name":"clamav-qualification"}' "$avbase/api/v1/cases") || av_ok=0
+            avcase_id=$(printf '%s' "$avcase" | python -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])') || av_ok=0
+            printf 'M4.5 harmless local fixture' >"$avtmp/clean"
+            clean=$(curl -fsS -X POST -H 'X-Filename: clean.txt' --data-binary "@$avtmp/clean" "$avbase/api/v1/cases/$avcase_id/files") || av_ok=0
+            clean_id=$(printf '%s' "$clean" | python -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])') || av_ok=0
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"engines":["clamav"]}' "$avbase/api/v1/files/$clean_id/av/scan" >"$avtmp/clean-scan.json" || av_ok=0
+            python - "$avtmp/clean-scan.json" <<'PY' || av_ok=0
+import json,sys
+try:
+    r=json.load(open(sys.argv[1]))["result"][0]
+    assert r["state"]=="clean" and r["engine"]=="clamav" and r["bytes_scanned"]>0
+except Exception:
+    print("clean scan JSON:", open(sys.argv[1], encoding="utf-8").read()[:8192], file=sys.stderr)
+    raise
+PY
+            if [ "$av_ok" -eq 1 ]; then record "ClamAV clean scan" PASS ""; else record "ClamAV clean scan" FAIL "real clamd clean scan failed"; av_diag_failed=1; dump_http_response "ClamAV clean scan" "$avtmp/clean-scan.json"; fi
+            # Evaluate the detection path independently so one failure does
+            # not hide the actual EICAR response.
+            av_ok=1
+            eicar='X5O!P%@AP[4\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*'
+            printf '%s' "$eicar" >"$avtmp/eicar"
+            printf 'EICAR fixture bytes=%s sha256=' "$(wc -c <"$avtmp/eicar")" >&2; sha256sum "$avtmp/eicar" | cut -d' ' -f1 >&2
+            detected=$(curl -fsS -X POST -H 'X-Filename: eicar.txt' --data-binary "@$avtmp/eicar" "$avbase/api/v1/cases/$avcase_id/files") || av_ok=0
+            detected_id=$(printf '%s' "$detected" | python -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])') || av_ok=0
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"engines":["clamav"]}' "$avbase/api/v1/files/$detected_id/av/scan" >"$avtmp/eicar-scan.json" || av_ok=0
+            python - "$avtmp/eicar-scan.json" <<'PY' || av_ok=0
+import json,sys
+try:
+    r=json.load(open(sys.argv[1]))["result"][0]
+    assert r["state"]=="detected" and r["detections"] and "Eicar" in r["detections"][0]["signature"]
+    assert r.get("engine_version") and r.get("database_version")
+except Exception:
+    print("EICAR scan JSON:", open(sys.argv[1], encoding="utf-8").read()[:8192], file=sys.stderr)
+    raise
+PY
+            if [ "$av_ok" -eq 1 ]; then record "ClamAV EICAR detection" PASS ""; record "ClamAV detection provenance" PASS ""; else record "ClamAV EICAR detection" FAIL "real clamd EICAR scan failed"; record "ClamAV detection provenance" FAIL "real clamd provenance check failed"; av_diag_failed=1; dump_http_response "ClamAV EICAR scan" "$avtmp/eicar-scan.json"; fi
+            restart_ok=1; docker compose -p "$av_project" restart osint-tools >/dev/null || restart_ok=0; i=0; while [ "$i" -lt 30 ]; do curl -fsS "$avbase/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done
+            curl -fsS "$avbase/api/v1/files/$detected_id/av" | python -c 'import json,sys; r=json.load(sys.stdin)["result"]["results"]; assert r and r[0]["state"]=="detected"' >/dev/null || restart_ok=0
+            [ "$restart_ok" -eq 1 ] && record "ClamAV persistence" PASS "" || { record "ClamAV persistence" FAIL "AV evidence did not survive restart"; av_diag_failed=1; curl -sS "$avbase/api/v1/files/$detected_id/av" -o "$avtmp/eicar-persist.json" || true; dump_http_response "ClamAV persistence" "$avtmp/eicar-persist.json"; }
+            rescan_ok=1
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"engines":["clamav"]}' "$avbase/api/v1/files/$detected_id/av/scan" >"$avtmp/eicar-rescan.json" || rescan_ok=0
+            curl -fsS "$avbase/api/v1/files/$detected_id/av" >"$avtmp/eicar-after-rescan.json" || rescan_ok=0
+            python - "$avtmp/eicar-scan.json" "$avtmp/eicar-rescan.json" "$avtmp/eicar-after-rescan.json" <<'PY' || rescan_ok=0
+import json, sys
+try:
+    first = json.load(open(sys.argv[1]))["result"][0]
+    second = json.load(open(sys.argv[2]))["result"][0]
+    history = json.load(open(sys.argv[3]))["result"]["results"]
+    assert second["state"] == "detected"
+    assert second["id"] == first["id"]
+    assert len([x for x in history if x["engine"] == "clamav"]) == 1
+except Exception:
+    print("rescan response:", open(sys.argv[2], encoding="utf-8").read()[:8192], file=sys.stderr)
+    print("rescan history:", open(sys.argv[3], encoding="utf-8").read()[:8192], file=sys.stderr)
+    raise
+PY
+            [ "$rescan_ok" -eq 1 ] && record "ClamAV rescan/idempotency" PASS "" || { record "ClamAV rescan/idempotency" FAIL "real clamd rescan was not deterministic"; av_diag_failed=1; dump_http_response "ClamAV rescan" "$avtmp/eicar-rescan.json"; dump_http_response "ClamAV rescan history" "$avtmp/eicar-after-rescan.json"; }
+            boundary_ok=1
+            curl -fsS -X POST -H 'Content-Type: application/json' -d '{"engines":["clamav"],"host":"127.0.0.1","port":1,"socket":"/tmp/forbidden","path":"/etc/passwd","url":"file:///etc/passwd"}' "$avbase/api/v1/files/$detected_id/av/scan" >"$avtmp/boundary.json" || boundary_ok=0
+            python - "$avtmp/boundary.json" <<'PY' || boundary_ok=0
+import json, sys
+r = json.load(open(sys.argv[1]))["result"][0]
+assert r["engine"] == "clamav" and r["state"] == "detected"
+assert not any(k in r for k in ("host", "port", "socket", "path", "url"))
+PY
+            [ "$boundary_ok" -eq 1 ] && record "M4.5 local AV boundary" PASS "administrator-configured INSTREAM scan; request destinations ignored" || { record "M4.5 local AV boundary" FAIL "AV destination boundary assertion failed"; av_diag_failed=1; dump_http_response "M4.5 local AV boundary" "$avtmp/boundary.json"; }
+            if [ "$av_diag_failed" -eq 1 ]; then
+                printf '%s\n' 'ClamAV qualification logs (bounded tails):' >&2
+                docker compose -p "$av_project" logs --no-color --tail=80 osint-tools clamav >&2 || true
+            fi
+            rm -rf "$avtmp"
+        else
+            record "ClamAV readiness" FAIL "real clamd did not answer PING within 90 seconds"
+            record "ClamAV clean scan" SKIPPED "clamd was not ready"
+            record "ClamAV EICAR detection" SKIPPED "clamd was not ready"
+            record "ClamAV detection provenance" SKIPPED "clamd was not ready"
+            record "ClamAV persistence" SKIPPED "clamd was not ready"
+            record "ClamAV rescan/idempotency" SKIPPED "clamd was not ready"
+            record "M4.5 local AV boundary" SKIPPED "clamd was not ready"
+        fi
+    else
+        record "ClamAV readiness" SKIPPED "optional ClamAV Compose profile could not be started"
+        record "ClamAV clean scan" SKIPPED "optional ClamAV profile unavailable"
+        record "ClamAV EICAR detection" SKIPPED "optional ClamAV profile unavailable"
+        record "ClamAV detection provenance" SKIPPED "optional ClamAV profile unavailable"
+        record "ClamAV persistence" SKIPPED "optional ClamAV profile unavailable"
+        record "ClamAV rescan/idempotency" SKIPPED "optional ClamAV profile unavailable"
+        record "M4.5 local AV boundary" SKIPPED "optional ClamAV profile unavailable"
+    fi
+    docker compose -p "$av_project" --profile av down -v >/dev/null 2>&1 || true
+else
+    record "ClamAV readiness" SKIPPED "Docker daemon is unavailable"
+    record "ClamAV clean scan" SKIPPED "Docker daemon is unavailable"
+    record "ClamAV EICAR detection" SKIPPED "Docker daemon is unavailable"
+    record "ClamAV detection provenance" SKIPPED "Docker daemon is unavailable"
+    record "ClamAV persistence" SKIPPED "Docker daemon is unavailable"
+    record "ClamAV rescan/idempotency" SKIPPED "Docker daemon is unavailable"
+    record "M4.5 local AV boundary" SKIPPED "Docker daemon is unavailable"
+fi
+unset OSINT_TOOLS_CLAMAV_ENABLED OSINT_TOOLS_AV_SCAN_ON_UPLOAD
 
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker image inspect osint-tools:dev >/dev/null 2>&1; then
     if docker run --rm --network none --entrypoint python osint-tools:dev -c 'import struct,tempfile,pathlib; from osint_tools.files.binary import analyze_binary; p=pathlib.Path(tempfile.mkstemp()[1]); p.write_bytes(b"\xcf\xfa\xed\xfe"+struct.pack("<IIIIIII",0x01000007,3,2,0,0,0,0)); assert analyze_binary(p,"macho",__import__("osint_tools.files.binary_common",fromlist=["BinaryLimits"]).BinaryLimits())[0]["status"]=="success"' >/dev/null; then
@@ -352,6 +501,10 @@ if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
             podman_target=$(curl -fsS -H 'Content-Type: application/json' -d '{"value":"1.1.1.1"}' "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/targets" 2>/dev/null || true)
             podman_upload=$(printf 'podman fixture' | curl -fsS -X POST -H 'X-Filename: podman.txt' --data-binary @- "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/files" 2>/dev/null || true)
             if podman exec "$podman_name" test -w /data; then record "Podman /data write" PASS ""; else record "Podman /data write" FAIL "/data is not writable"; fi
+            # The application qualification intentionally does not start a
+            # second real clamd service under Podman; doing so would require
+            # new Podman-specific deployment orchestration.
+            record "Podman ClamAV runtime" SKIPPED "optional Compose-profile clamd is not wired into the Podman application harness"
             if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && [ -n "$podman_upload" ] && podman exec "$podman_name" python -c 'import PIL, osint_tools.files.pe, osint_tools.files.elf, osint_tools.files.macho, osint_tools.files.amiga_hunk, osint_tools.files.yara_engine, osint_tools.files.similarity' && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
                 record "Podman runtime/non-root" PASS ""
                 record "Podman parser imports" PASS ""
@@ -363,12 +516,14 @@ if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
             record "Podman runtime/non-root" FAIL "container failed to start"
             record "Podman /data write" SKIPPED "Podman container did not start"
             record "Podman parser imports" SKIPPED "Podman container did not start"
+            record "Podman ClamAV runtime" SKIPPED "Podman application container did not start"
         fi
     else
         record "Podman build" FAIL "build failed"
         record "Podman runtime/non-root" SKIPPED "Podman image did not build"
         record "Podman /data write" SKIPPED "Podman image did not build"
         record "Podman parser imports" SKIPPED "Podman image did not build"
+        record "Podman ClamAV runtime" SKIPPED "Podman image did not build"
     fi
     podman rm -f "$podman_name" >/dev/null 2>&1 || true
     podman rmi "$podman_name" >/dev/null 2>&1 || true
@@ -377,6 +532,7 @@ else
     record "Podman runtime/non-root" SKIPPED "Podman is unavailable"
     record "Podman /data write" SKIPPED "Podman is unavailable"
     record "Podman parser imports" SKIPPED "Podman is unavailable"
+    record "Podman ClamAV runtime" SKIPPED "Podman is unavailable"
 fi
 
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker buildx inspect --bootstrap >/tmp/osint-tools-buildx-$$ 2>&1; then

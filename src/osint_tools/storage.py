@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def utcnow() -> str:
@@ -194,6 +194,32 @@ class Store:
                     fingerprint TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY(object_sha256, algorithm)
+                );
+                CREATE TABLE IF NOT EXISTS av_scan_results (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                    artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                    object_sha256 TEXT NOT NULL REFERENCES file_objects(sha256),
+                    engine TEXT NOT NULL,
+                    engine_version TEXT,
+                    database_version TEXT,
+                    database_timestamp TEXT,
+                    state TEXT NOT NULL,
+                    scanned_at TEXT NOT NULL,
+                    duration_ms INTEGER,
+                    bytes_scanned INTEGER,
+                    error_code TEXT,
+                    message TEXT,
+                    detections_json TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_av_scan_results_file ON av_scan_results(file_id, id);
+                CREATE TABLE IF NOT EXISTS av_detections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_result_id INTEGER NOT NULL REFERENCES av_scan_results(id) ON DELETE CASCADE,
+                    signature TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL
                 );
                 """
             )
@@ -513,3 +539,34 @@ class Store:
         with self.connect() as conn:
             rows=conn.execute("SELECT f.id file_id,f.case_id,f.original_filename,f.object_sha256,fp.fingerprint,fp.implementation_version FROM files f JOIN file_fingerprints fp ON fp.object_sha256=f.object_sha256 WHERE fp.algorithm=? AND f.id<>? ORDER BY f.id LIMIT ?",(algorithm,file_id,maximum)).fetchall()
         return [dict(row) for row in rows]
+
+    def persist_av_result(self, file_id: int, result: dict[str, Any]) -> dict[str, Any]:
+        file = self.get_file(file_id)
+        if file is None: raise KeyError("file not found")
+        detections = result.get("detections", [])[:100]
+        provenance = dict(result.get("provenance", {})); provenance["object_sha256"] = file["sha256"]
+        with self.connect() as conn:
+            recent = conn.execute("SELECT * FROM av_scan_results WHERE file_id=? AND engine=? ORDER BY id DESC LIMIT 5", (file_id, result["engine"])).fetchall()
+            detection_json = json.dumps(detections, separators=(",", ":"), sort_keys=True)
+            for old in recent:
+                if old["engine_version"] == result.get("engine_version") and old["database_version"] == result.get("database_version") and old["state"] == result["state"] and old["detections_json"] == detection_json:
+                    return self._av_row(old)
+            artifact_data = {"engine": result["engine"], "engine_version": result.get("engine_version"), "database_version": result.get("database_version"), "state": result["state"], "detections": detections, "scanned_at": result.get("scanned_at"), "bytes_scanned": result.get("bytes_scanned"), "error_code": result.get("error_code"), "provenance": provenance}
+            cur = conn.execute("INSERT INTO artifacts(case_id,target_id,type,source,data_json,created_at) VALUES(?,?,?,?,?,?)", (file["case_id"], file["target_id"], "antivirus_scan", "local", json.dumps(artifact_data, separators=(",", ":"), sort_keys=True), result.get("scanned_at") or utcnow()))
+            artifact_id = int(cur.lastrowid)
+            conn.execute("INSERT INTO file_structured_artifacts(file_id,artifact_id) VALUES(?,?)", (file_id, artifact_id))
+            cur = conn.execute("INSERT INTO av_scan_results(file_id,artifact_id,object_sha256,engine,engine_version,database_version,database_timestamp,state,scanned_at,duration_ms,bytes_scanned,error_code,message,detections_json,provenance_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (file_id, artifact_id, file["sha256"], result["engine"], result.get("engine_version"), result.get("database_version"), result.get("database_timestamp"), result["state"], result.get("scanned_at") or utcnow(), result.get("duration_ms"), result.get("bytes_scanned"), result.get("error_code"), result.get("message"), detection_json, json.dumps(provenance, separators=(",", ":"), sort_keys=True), utcnow()))
+            scan_id = int(cur.lastrowid)
+            for detection in detections:
+                conn.execute("INSERT INTO av_detections(scan_result_id,signature,metadata_json) VALUES(?,?,?)", (scan_id, str(detection.get("signature", ""))[:256], json.dumps({key: value for key, value in detection.items() if key != "signature"}, separators=(",", ":"), sort_keys=True)))
+            row = conn.execute("SELECT * FROM av_scan_results WHERE id=?", (scan_id,)).fetchone()
+        return self._av_row(row)
+
+    @staticmethod
+    def _av_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row); item["detections"] = json.loads(item.pop("detections_json")); item["provenance"] = json.loads(item.pop("provenance_json")); return item
+
+    def list_av_results(self, file_id: int, limit: int = 100) -> list[dict[str, Any]]:
+        if self.get_file(file_id) is None: raise KeyError("file not found")
+        with self.connect() as conn: rows = conn.execute("SELECT * FROM av_scan_results WHERE file_id=? ORDER BY id DESC LIMIT ?", (file_id, max(1, min(int(limit), 100)))).fetchall()
+        return [self._av_row(row) for row in rows]

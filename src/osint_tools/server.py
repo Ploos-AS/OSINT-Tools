@@ -14,6 +14,8 @@ from .files.candidates import promote_candidate
 from .files.detections import DetectionLimits, analyze_detections, import_hashset, import_rule_pack, similar_files
 from .files.hashsets import HashSetError
 from .files.yara_engine import RuleError, YaraLimits
+from .av import AVRegistry, ClamAVEngine
+from .av.service import AVError, scan_file
 from .pivots import pivot_dns
 from .provider_service import enrich_target, execute_provider
 from .providers import ProviderError, builtin_registry
@@ -57,10 +59,34 @@ DETECTION_LIMITS = DetectionLimits(
     hashset_max_bytes=int(os.environ.get("OSINT_TOOLS_HASHSET_MAX_BYTES", str(4 * 1024 * 1024))),
     similar_max_results=int(os.environ.get("OSINT_TOOLS_SIMILAR_MAX_RESULTS", "100")),
 )
+def _env_bool(name: str, default: bool = False) -> bool:
+    return os.environ.get(name, str(default)).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int, minimum: int | None = None, maximum: int | None = None) -> int:
+    try: value = int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError): value = default
+    if minimum is not None: value = max(minimum, value)
+    if maximum is not None: value = min(maximum, value)
+    return value
+
+
+def _env_float(name: str, default: float, minimum: float | None = None) -> float:
+    try: value = float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError): value = default
+    if minimum is not None: value = max(minimum, value)
+    return value
+
+
+AV_TIMEOUT_SECONDS = _env_float("OSINT_TOOLS_CLAMAV_TIMEOUT_SECONDS", 15.0, 0.01)
+AV_MAX_RESPONSE_BYTES = _env_int("OSINT_TOOLS_CLAMAV_MAX_RESPONSE_BYTES", 4096, 256, 1024 * 1024)
+AV_SCAN_ON_UPLOAD = _env_bool("OSINT_TOOLS_AV_SCAN_ON_UPLOAD", False)
+AV_MAX_ENGINES = _env_int("OSINT_TOOLS_AV_MAX_ENGINES", 4, 1, 32)
+AV_REGISTRY = AVRegistry([ClamAVEngine(_env_bool("OSINT_TOOLS_CLAMAV_ENABLED", False), os.environ.get("OSINT_TOOLS_CLAMAV_HOST", "clamav"), _env_int("OSINT_TOOLS_CLAMAV_PORT", 3310, 1, 65535))])
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.4.4"
+    server_version = "OSINT-Tools/0.4.5"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -94,7 +120,11 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M4.4", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M4.5", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
+            if parsed.path == "/api/v1/av/engines":
+                return self._json(200, {"ok": True, "result": [engine.status() for engine in AV_REGISTRY.list()[:AV_MAX_ENGINES]]})
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "av"] and parts[3] == "engines":
+                engine=AV_REGISTRY.get(parts[4]); return self._json(200,{"ok":True,"result":engine.status()}) if engine else self._json(404,{"ok":False,"error":{"code":"unknown_engine","message":"antivirus engine not found"}})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "files"]:
                 result = STORE.get_file(int(parts[3]))
                 return self._json(200, {"ok": True, "result": result}) if result else self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
@@ -118,6 +148,10 @@ class Handler(BaseHTTPRequestHandler):
                 try: result = similar_files(STORE, int(parts[3]), int(q.get("limit", ["20"])[0]), DETECTION_LIMITS.similar_max_results)
                 except KeyError: return self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
                 return self._json(200, {"ok": True, "result": result})
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "files"] and parts[4] == "av":
+                try: result=STORE.list_av_results(int(parts[3]))
+                except KeyError: return self._json(404,{"ok":False,"error":{"code":"file_not_found","message":"file not found"}})
+                return self._json(200,{"ok":True,"result":{"file_id":int(parts[3]),"results":result}})
             if parsed.path == "/api/v1/signatures/rulepacks":
                 return self._json(200, {"ok": True, "result": STORE.list_rule_packs()})
             if parsed.path == "/api/v1/signatures/hashsets":
@@ -172,6 +206,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     raise FileError("invalid_content_length", "content length must be an integer", 400) from None
                 result = ingest_file(STORE, FILE_STORE, int(parts[3]), self.rfile, content_length, self.headers.get("X-Filename", "unnamed"), MAX_UPLOAD_BYTES, ANALYSIS_LIMITS, BINARY_LIMITS, DETECTION_LIMITS)
+                if AV_SCAN_ON_UPLOAD:
+                    scan_file(STORE, FILE_STORE, AV_REGISTRY, result["id"], None, AV_TIMEOUT_SECONDS, AV_MAX_RESPONSE_BYTES)
                 return self._json(201, {"ok": True, "result": result})
             if len(parts) == 7 and parts[:3] == ["api", "v1", "files"] and parts[4] == "candidates" and parts[6] == "promote":
                 return self._json(200, {"ok": True, "result": promote_candidate(STORE, int(parts[3]), int(parts[5]))})
@@ -181,6 +217,12 @@ class Handler(BaseHTTPRequestHandler):
                 body = self._body(DETECTION_LIMITS.yara.max_pack_bytes)
             else:
                 body = self._body()
+            if len(parts) == 6 and parts[:3] == ["api", "v1", "files"] and parts[4:] == ["av", "scan"]:
+                selected=body.get("engines")
+                if selected is not None and (not isinstance(selected,list) or len(selected)>AV_MAX_ENGINES or any(not isinstance(item,str) for item in selected)):
+                    raise AVError("invalid_engines", "engines must be a bounded list", 400)
+                result=scan_file(STORE, FILE_STORE, AV_REGISTRY, int(parts[3]), selected, AV_TIMEOUT_SECONDS, AV_MAX_RESPONSE_BYTES)
+                return self._json(200,{"ok":True,"result":result})
             if parts == ["api", "v1", "signatures", "rulepacks"]:
                 return self._json(201, {"ok": True, "result": import_rule_pack(STORE, body, DETECTION_LIMITS)})
             if parts == ["api", "v1", "signatures", "hashsets"]:
@@ -220,6 +262,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._provider_error(exc)
         except FileError as exc:
             return self._json(exc.status, {"ok": False, "error": exc.payload()})
+        except AVError as exc:
+            return self._json(exc.status, {"ok": False, "error": exc.payload()})
         except (RuleError, HashSetError) as exc:
             return self._json(422, {"ok": False, "error": {"code": "invalid_signature_material", "message": str(exc)}})
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
@@ -256,7 +300,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M4.4 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M4.5 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

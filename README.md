@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M4.4 Signatures, Rules & Similarity** adds offline, non-executing local YARA-compatible literal rules, versioned known-hash sets, normalized detection evidence, and SimHash comparison across stored content. Existing ingestion, structured/binary analysis, cases, pivots, and optional providers remain available without API keys.
+**M4.5 Local Antivirus Engine Framework + ClamAV** adds an optional local antivirus registry, bounded ClamAV INSTREAM scanning, normalized antivirus evidence, versioned engine/database provenance, and explicit rescan APIs. Existing local rule/hash/similarity analysis remains available without ClamAV.
 
 ## Run with Docker or Podman
 
@@ -37,8 +37,12 @@ Binary candidates are metadata, not targets or evidence of runtime behavior. Lis
 
 Local detections remain evidence rather than malware verdicts. Managed rule packs and hash sets are imported as immutable named versions through `/api/v1/signatures/rulepacks` and `/api/v1/signatures/hashsets`. File evidence is available from `GET /api/v1/files/{file_id}/detections`; `GET /api/v1/files/{file_id}/similar` returns native `simhash64-v1` Hamming distances. Explicit reanalysis uses `POST /api/v1/files/{file_id}/detections/reanalyze` and never invokes providers or the network.
 
+ClamAV is optional and disabled by default. Enable it with `OSINT_TOOLS_CLAMAV_ENABLED=true` and the administrator-configured `OSINT_TOOLS_CLAMAV_HOST`/`PORT`; an optional Compose profile starts `clamav/clamav:1.4.3` with a separate `clamav-db` volume. Scan files explicitly with `POST /api/v1/files/{file_id}/av/scan`, inspect status at `/api/v1/av/engines`, and retrieve persisted results at `/api/v1/files/{file_id}/av`. `OSINT_TOOLS_AV_SCAN_ON_UPLOAD=true` enables only a top-level local scan; archive children are never multiplied into automatic AV requests. ClamAV receives streamed bytes over the configured local service boundary, never a host path.
+
+AV `clean`, `detected`, `error`, `timeout`, `unavailable`, `unsupported`, and `skipped` states are evidence. Clean does not mean safe, and detection does not prove maliciousness. ClamAV signature updates are owned by the optional service; OSINT Tools never downloads or updates signatures.
+
 Run the non-interactive qualification harness with `scripts/qualify.sh`. It reports each Docker, Podman, regression, persistence, and per-provider live gate as `PASS`, `FAIL`, or `SKIPPED`; live calls run only when the corresponding credential is present.
 
 The same OCI image is intended for Docker and Podman, amd64 and arm64, and runs as a non-root user. Persistent application data lives under `/data`.
 
-See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
+See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/M4_5_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
