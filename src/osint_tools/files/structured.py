@@ -7,9 +7,10 @@ from .image import analyze_image
 from .pdf import analyze_pdf
 from .binary import analyze_binary
 from .binary_common import BinaryLimits
+from .detections import DetectionLimits, analyze_detections
 
 
-def analyze_structured(store, objects, file_record: dict, limits: AnalysisLimits, budget: AnalysisBudget | None = None, depth: int = 0, visited: set[str] | None = None, binary_limits: BinaryLimits | None = None) -> list[dict]:
+def analyze_structured(store, objects, file_record: dict, limits: AnalysisLimits, budget: AnalysisBudget | None = None, depth: int = 0, visited: set[str] | None = None, binary_limits: BinaryLimits | None = None, detection_limits: DetectionLimits | None = None) -> list[dict]:
     budget = budget or AnalysisBudget(limits)
     visited = visited or {file_record["sha256"]}
     artifacts = []
@@ -28,7 +29,7 @@ def analyze_structured(store, objects, file_record: dict, limits: AnalysisLimits
                     member["recursion_status"] = "repeated_content"
                     continue
                 visited.add(child["sha256"])
-                analyze_structured(store, objects, child, limits, budget, child_depth, visited, binary_limits)
+                analyze_structured(store, objects, child, limits, budget, child_depth, visited, binary_limits, detection_limits)
 
     if detected in ("png", "jpeg", "gif"):
         artifacts.append(store.add_structured_artifact(file_record["id"], "image_metadata", analyze_image(path, limits)))
@@ -41,4 +42,5 @@ def analyze_structured(store, objects, file_record: dict, limits: AnalysisLimits
     if detected in ("pe", "elf", "macho", "amiga_hunk"):
         binary, candidates = analyze_binary(path, detected, binary_limits or BinaryLimits())
         artifacts.append(store.add_binary_analysis(file_record["id"], binary, candidates))
+    artifacts.append(analyze_detections(store, objects, file_record, detection_limits or DetectionLimits()))
     return artifacts

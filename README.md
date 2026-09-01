@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M4.3 Executable & Binary Static Analysis** adds bounded, non-executing PE, ELF, Mach-O and Amiga Hunk parsing, printable strings, entropy measurements, candidate OSINT indicators, and explicit graph promotion. Existing ingestion, structured analysis, passive primitives, cases, pivots, and optional providers remain available without API keys.
+**M4.4 Signatures, Rules & Similarity** adds offline, non-executing local YARA-compatible literal rules, versioned known-hash sets, normalized detection evidence, and SimHash comparison across stored content. Existing ingestion, structured/binary analysis, cases, pivots, and optional providers remain available without API keys.
 
 ## Run with Docker or Podman
 
@@ -35,8 +35,10 @@ Archive members are never unpacked into filename-derived paths. Eligible childre
 
 Binary candidates are metadata, not targets or evidence of runtime behavior. List them with `GET /api/v1/files/{file_id}/candidates` and explicitly promote a supported candidate with `POST /api/v1/files/{file_id}/candidates/{candidate_id}/promote`. Promotion only updates the local case graph; it performs no DNS, HTTP, provider enrichment, or file upload. Email observations remain candidates because email is not yet a normal target type.
 
+Local detections remain evidence rather than malware verdicts. Managed rule packs and hash sets are imported as immutable named versions through `/api/v1/signatures/rulepacks` and `/api/v1/signatures/hashsets`. File evidence is available from `GET /api/v1/files/{file_id}/detections`; `GET /api/v1/files/{file_id}/similar` returns native `simhash64-v1` Hamming distances. Explicit reanalysis uses `POST /api/v1/files/{file_id}/detections/reanalyze` and never invokes providers or the network.
+
 Run the non-interactive qualification harness with `scripts/qualify.sh`. It reports each Docker, Podman, regression, persistence, and per-provider live gate as `PASS`, `FAIL`, or `SKIPPED`; live calls run only when the corresponding credential is present.
 
 The same OCI image is intended for Docker and Podman, amd64 and arm64, and runs as a non-root user. Persistent application data lives under `/data`.
 
-See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
+See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.

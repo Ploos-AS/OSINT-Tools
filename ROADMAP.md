@@ -9,5 +9,6 @@
 - **M4.1 Local Artifact Analysis Foundation — complete:** bounded streaming upload, content-addressed storage, hashes, baseline signatures, file targets and persistent local analysis.
 - **M4.2 Safe Structured Content Analysis — complete:** bounded ZIP/TAR/gzip recursion, child provenance, image/EXIF headers, PDF metadata and ZIP-office/ODF metadata.
 - **M4.3 Executable & Binary Static Analysis — complete:** bounded internal PE/ELF/Mach-O/Amiga Hunk parsers, strings, entropy, persistent indicator candidates and explicit graph promotion.
+- **M4.4 Signatures, Rules & Similarity — complete:** managed versioned YARA-compatible rules and known-hash sets, normalized local evidence, SimHash fingerprints, local comparison and explicit reanalysis.
 - **M4 File/Image Intelligence:** later safe parsers may add archives, EXIF and perceptual hashes without executing content.
 - **M5 Release & Polish:** richer web UI, exports, documentation, packaging, security review and release qualification.

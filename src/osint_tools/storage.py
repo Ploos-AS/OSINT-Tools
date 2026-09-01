@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def utcnow() -> str:
@@ -133,6 +133,68 @@ class Store:
                 );
                 CREATE INDEX IF NOT EXISTS idx_file_candidates_file_type
                     ON file_candidates(file_id, type, id);
+
+                CREATE TABLE IF NOT EXISTS rule_packs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    rules_text TEXT NOT NULL,
+                    rules_sha256 TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(name, version)
+                );
+                CREATE TABLE IF NOT EXISTS hash_sets (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    version TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    entry_count INTEGER NOT NULL,
+                    content_sha256 TEXT NOT NULL,
+                    imported_at TEXT NOT NULL,
+                    UNIQUE(name, version)
+                );
+                CREATE TABLE IF NOT EXISTS hash_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    hash_set_id INTEGER NOT NULL REFERENCES hash_sets(id) ON DELETE CASCADE,
+                    algorithm TEXT NOT NULL,
+                    digest TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    UNIQUE(hash_set_id, algorithm, digest)
+                );
+                CREATE INDEX IF NOT EXISTS idx_hash_entries_digest ON hash_entries(algorithm, digest);
+                CREATE TABLE IF NOT EXISTS file_detections (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                    artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                    analyzer TEXT NOT NULL,
+                    analyzer_version TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    signature_id TEXT NOT NULL,
+                    namespace TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    tags_json TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL,
+                    result TEXT NOT NULL,
+                    provenance_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(file_id, method, signature_id, namespace, artifact_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_file_detections_file_method ON file_detections(file_id, method, id);
+                CREATE TABLE IF NOT EXISTS file_fingerprints (
+                    object_sha256 TEXT NOT NULL REFERENCES file_objects(sha256) ON DELETE CASCADE,
+                    algorithm TEXT NOT NULL,
+                    implementation_version TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(object_sha256, algorithm)
+                );
                 """
             )
             relationship_columns = {row[1] for row in conn.execute("PRAGMA table_info(relationships)")}
@@ -373,3 +435,81 @@ class Store:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM file_candidates WHERE file_id=? AND id=?", (file_id, candidate_id)).fetchone()
         return self._row(row)
+
+    def add_rule_pack(self, pack: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            conn.execute("INSERT OR IGNORE INTO rule_packs(name,version,namespace,source,description,rules_text,rules_sha256,created_at) VALUES(?,?,?,?,?,?,?,?)", (pack["name"], pack["version"], pack["namespace"], pack["source"], pack["description"], pack["rules_text"], pack["rules_sha256"], utcnow()))
+            row = conn.execute("SELECT id,name,version,namespace,source,description,rules_sha256,created_at FROM rule_packs WHERE name=? AND version=?", (pack["name"], pack["version"])).fetchone()
+        return dict(row)
+
+    def list_rule_packs(self, include_rules: bool = False) -> list[dict[str, Any]]:
+        columns = "*" if include_rules else "id,name,version,namespace,source,description,rules_sha256,created_at"
+        with self.connect() as conn: rows = conn.execute(f"SELECT {columns} FROM rule_packs ORDER BY id").fetchall()
+        return [dict(row) for row in rows]
+
+    def import_hash_set(self, item: dict[str, Any]) -> dict[str, Any]:
+        with self.connect() as conn:
+            existing = conn.execute("SELECT * FROM hash_sets WHERE name=? AND version=?", (item["name"], item["version"])).fetchone()
+            if existing is not None:
+                if existing["content_sha256"] != item["content_sha256"]:
+                    raise ValueError("hash-set name and version already identify different content")
+                return dict(existing)
+            cur = conn.execute("INSERT INTO hash_sets(name,version,source,description,category,entry_count,content_sha256,imported_at) VALUES(?,?,?,?,?,?,?,?)", (item["name"], item["version"], item["source"], item["description"], item["category"], len({(e["algorithm"],e["digest"]) for e in item["entries"]}), item["content_sha256"], utcnow()))
+            set_id = int(cur.lastrowid)
+            for entry in item["entries"]:
+                conn.execute("INSERT OR IGNORE INTO hash_entries(hash_set_id,algorithm,digest,label,tags_json,metadata_json) VALUES(?,?,?,?,?,?)", (set_id, entry["algorithm"], entry["digest"], entry["label"], json.dumps(entry["tags"]), json.dumps(entry["metadata"], separators=(",", ":"), sort_keys=True)))
+            row = conn.execute("SELECT * FROM hash_sets WHERE id=?", (set_id,)).fetchone()
+        return dict(row)
+
+    def list_hash_sets(self) -> list[dict[str, Any]]:
+        with self.connect() as conn: rows = conn.execute("SELECT * FROM hash_sets ORDER BY id").fetchall()
+        return [dict(row) for row in rows]
+
+    def get_hash_set(self, set_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn: row = conn.execute("SELECT * FROM hash_sets WHERE id=?", (set_id,)).fetchone()
+        return self._row(row)
+
+    def matching_hash_entries(self, hashes: dict[str, str]) -> list[dict[str, Any]]:
+        clauses=[]; args=[]
+        for algorithm,digest in hashes.items(): clauses.append("(he.algorithm=? AND he.digest=?)"); args.extend((algorithm,digest))
+        with self.connect() as conn:
+            rows=conn.execute("SELECT he.*,hs.name set_name,hs.version set_version,hs.source set_source,hs.category set_category FROM hash_entries he JOIN hash_sets hs ON hs.id=he.hash_set_id WHERE "+" OR ".join(clauses),args).fetchall()
+        result=[]
+        for row in rows:
+            item=dict(row); item["tags"]=json.loads(item.pop("tags_json")); item["metadata"]=json.loads(item.pop("metadata_json")); result.append(item)
+        return result
+
+    def replace_local_detections(self, file_id: int, summary: dict[str, Any], detections: list[dict[str, Any]]) -> dict[str, Any]:
+        file=self.get_file(file_id)
+        if file is None: raise KeyError("file not found")
+        now=utcnow()
+        with self.connect() as conn:
+            old=conn.execute("SELECT a.id FROM file_structured_artifacts fsa JOIN artifacts a ON a.id=fsa.artifact_id WHERE fsa.file_id=? AND a.type='local_detections'",(file_id,)).fetchall()
+            for row in old: conn.execute("DELETE FROM artifacts WHERE id=?",(row["id"],))
+            cur=conn.execute("INSERT INTO artifacts(case_id,target_id,type,source,data_json,created_at) VALUES(?,?,?,?,?,?)",(file["case_id"],file["target_id"],"local_detections","local",json.dumps(summary,separators=(",",":"),sort_keys=True),now))
+            artifact_id=int(cur.lastrowid); conn.execute("INSERT INTO file_structured_artifacts(file_id,artifact_id) VALUES(?,?)",(file_id,artifact_id))
+            conn.execute("DELETE FROM file_detections WHERE file_id=?",(file_id,))
+            for item in detections:
+                conn.execute("INSERT INTO file_detections(file_id,artifact_id,analyzer,analyzer_version,method,signature_id,namespace,title,tags_json,metadata_json,result,provenance_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",(file_id,artifact_id,item["analyzer"],item["analyzer_version"],item["method"],item["signature_id"],item["namespace"],item["title"],json.dumps(item["tags"]),json.dumps(item["metadata"],separators=(",",":"),sort_keys=True),item["result"],json.dumps(item["provenance"],separators=(",",":"),sort_keys=True),now))
+            row=conn.execute("SELECT * FROM artifacts WHERE id=?",(artifact_id,)).fetchone()
+        result=dict(row); result["data"]=json.loads(result.pop("data_json")); return result
+
+    def list_file_detections(self, file_id: int) -> list[dict[str, Any]]:
+        if self.get_file(file_id) is None: raise KeyError("file not found")
+        with self.connect() as conn: rows=conn.execute("SELECT * FROM file_detections WHERE file_id=? ORDER BY method,namespace,signature_id",(file_id,)).fetchall()
+        result=[]
+        for row in rows:
+            item=dict(row); item["tags"]=json.loads(item.pop("tags_json")); item["metadata"]=json.loads(item.pop("metadata_json")); item["provenance"]=json.loads(item.pop("provenance_json")); result.append(item)
+        return result
+
+    def put_fingerprint(self, object_sha256: str, algorithm: str, version: str, value: str) -> None:
+        with self.connect() as conn: conn.execute("INSERT OR REPLACE INTO file_fingerprints(object_sha256,algorithm,implementation_version,fingerprint,created_at) VALUES(?,?,?,?,?)",(object_sha256,algorithm,version,value,utcnow()))
+
+    def get_fingerprint(self, object_sha256: str, algorithm: str) -> dict[str, Any] | None:
+        with self.connect() as conn: row=conn.execute("SELECT * FROM file_fingerprints WHERE object_sha256=? AND algorithm=?",(object_sha256,algorithm)).fetchone()
+        return self._row(row)
+
+    def similarity_candidates(self, file_id: int, algorithm: str, maximum: int = 10000) -> list[dict[str, Any]]:
+        with self.connect() as conn:
+            rows=conn.execute("SELECT f.id file_id,f.case_id,f.original_filename,f.object_sha256,fp.fingerprint,fp.implementation_version FROM files f JOIN file_fingerprints fp ON fp.object_sha256=f.object_sha256 WHERE fp.algorithm=? AND f.id<>? ORDER BY f.id LIMIT ?",(algorithm,file_id,maximum)).fetchall()
+        return [dict(row) for row in rows]

@@ -54,8 +54,8 @@ def test_reupload_keeps_per_file_results_and_deduplicates_objects(tmp_path):
     first = upload(store, objects, case, raw, "first.zip")
     second = upload(store, objects, case, raw, "second.zip")
     assert first["id"] != second["id"] and first["storage_id"] == second["storage_id"]
-    assert len(store.get_file_analysis(first["id"])["structured"]) == 1
-    assert len(store.get_file_analysis(second["id"])["structured"]) == 1
+    assert len([item for item in store.get_file_analysis(first["id"])["structured"] if item["type"] == "archive_analysis"]) == 1
+    assert len([item for item in store.get_file_analysis(second["id"])["structured"] if item["type"] == "archive_analysis"]) == 1
     assert len([path for path in objects.objects.rglob("*") if path.is_file()]) == 2
 
 

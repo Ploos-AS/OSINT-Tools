@@ -50,6 +50,13 @@ run_gate "M4.3 binary analysis" python -m pytest -q tests/test_binary_analysis.p
 run_gate "binary formats/malformed" python -m pytest -q tests/test_binary_analysis.py -k 'formats_and_malformed or metadata'
 run_gate "strings/entropy/candidates" python -m pytest -q tests/test_binary_analysis.py -k 'entropy or candidate'
 run_gate "binary ZIP-child analysis" python -m pytest -q tests/test_binary_analysis.py::test_binary_child_inside_zip_uses_existing_pipeline
+run_gate "M4.4 rules and detections" python -m pytest -q tests/test_m44_detections.py tests/test_m44_api.py
+run_gate "YARA local/nonmatch/malformed" python -m pytest -q tests/test_m44_detections.py -k yara
+run_gate "YARA provenance/limits/timeout" python -m pytest -q tests/test_m44_detections.py -k 'rule_pack or yara'
+run_gate "known hash/import/provenance" python -m pytest -q tests/test_m44_detections.py -k 'known_hash or hashset'
+run_gate "similarity fingerprint/search" python -m pytest -q tests/test_m44_detections.py -k similarity
+run_gate "detection reanalysis/idempotency" python -m pytest -q tests/test_m44_detections.py -k reanalysis
+run_gate "archive-child detection" python -m pytest -q tests/test_m44_detections.py -k archive_child
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
@@ -86,8 +93,9 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.4.3" and i["milestone"] == "M4.3" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.4.4" and i["milestone"] == "M4.4" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
+assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
     case_json=$(curl -fsS -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases") || api_ok=0
@@ -256,12 +264,43 @@ PY
     [ "$binary_ok" -eq 1 ] && record "M4.3 binary runtime" PASS "" || record "M4.3 binary runtime" FAIL "binary format/candidate/promotion checks failed"
     binary_file_id=$(cat "$tmp_dir/binary-id" 2>/dev/null || true)
 
+    m44_ok=1
+    printf 'M44_RUNTIME OSINT_TOOLS_DEMO_SIGNATURE close body alpha' >"$tmp_dir/m44-a"
+    printf 'M44_RUNTIME OSINT_TOOLS_DEMO_SIGNATURE close body beta' >"$tmp_dir/m44-b"
+    m44_sha=$(sha256sum "$tmp_dir/m44-a" | cut -d' ' -f1)
+    curl -fsS -H 'Content-Type: application/json' -d '{"name":"runtime","version":"1","namespace":"qualification","source":"OSINT Tools qualification","rules":"rule RuntimeRule : harmless { meta: title = \"Runtime harmless rule\" strings: $a = \"M44_RUNTIME\" condition: any of them }"}' "$base/api/v1/signatures/rulepacks" >"$tmp_dir/rulepack.json" || m44_ok=0
+    python - "$m44_sha" >"$tmp_dir/hashset-body.json" <<'PY'
+import json,sys
+print(json.dumps({"name":"runtime-reference","version":"1","source":"qualification","category":"reference","entries":[{"algorithm":"sha256","digest":sys.argv[1],"label":"harmless runtime fixture"}]}))
+PY
+    curl -fsS -H 'Content-Type: application/json' --data-binary "@$tmp_dir/hashset-body.json" "$base/api/v1/signatures/hashsets" >"$tmp_dir/hashset.json" || m44_ok=0
+    upload_file "$tmp_dir/m44-a" "m44-a.bin" >"$tmp_dir/m44-a.json" || m44_ok=0
+    upload_file "$tmp_dir/m44-b" "m44-b.bin" >"$tmp_dir/m44-b.json" || m44_ok=0
+    python - "$tmp_dir" <<'PY'
+import zipfile,sys
+with zipfile.ZipFile(sys.argv[1]+"/m44-child.zip","w") as z:z.writestr("child.bin",b"OSINT_TOOLS_DEMO_SIGNATURE")
+PY
+    upload_file "$tmp_dir/m44-child.zip" "m44-child.zip" >"$tmp_dir/m44-child.json" || m44_ok=0
+    python - "$base" "$tmp_dir" <<'PY' || m44_ok=0
+import json,sys,urllib.request
+base,d=sys.argv[1:]
+a=json.load(open(d+'/m44-a.json'))['result']; b=json.load(open(d+'/m44-b.json'))['result']
+det=json.load(urllib.request.urlopen(f'{base}/api/v1/files/{a["id"]}/detections'))['result']; assert {'yara','known_hash'} <= {x['method'] for x in det}; assert any(x['namespace']=='qualification' and x['provenance']['rule_pack_version']=='1' for x in det)
+similar=json.load(urllib.request.urlopen(f'{base}/api/v1/files/{a["id"]}/similar?limit=1'))['result']; assert len(similar)==1 and similar[0]['file_id']==b['id'] and 0 <= similar[0]['distance'] <= 64
+req=urllib.request.Request(f'{base}/api/v1/files/{a["id"]}/detections/reanalyze',data=b'{}',headers={'Content-Type':'application/json'},method='POST'); urllib.request.urlopen(req).read(); after=json.load(urllib.request.urlopen(f'{base}/api/v1/files/{a["id"]}/detections'))['result']; assert len(after)==len(det)
+parent=json.load(open(d+'/m44-child.json'))['result']; analysis=json.load(urllib.request.urlopen(f'{base}/api/v1/files/{parent["id"]}/analysis'))['result']; child=next(x for x in analysis['structured'] if x['type']=='archive_analysis')['data']['members'][0]['child_file_id']; child_det=json.load(urllib.request.urlopen(f'{base}/api/v1/files/{child}/detections'))['result']; assert any(x['signature_id']=='OSINT_Tools_Harmless_Demo' for x in child_det)
+open(d+'/m44-id','w').write(str(a['id']))
+PY
+    [ "$m44_ok" -eq 1 ] && record "M4.4 detection runtime" PASS "" || record "M4.4 detection runtime" FAIL "rules/hash/similarity/reanalysis/archive checks failed"
+    m44_file_id=$(cat "$tmp_dir/m44-id" 2>/dev/null || true)
+
     if docker compose -p "$docker_project" restart >/dev/null && \
        i=0; while [ "$i" -lt 30 ]; do curl -fsS "$base/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done; \
        curl -fsS "$base/api/v1/cases/$case_id" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["name"] == "qualification"' && \
        curl -fsS "$base/api/v1/files/$text_file_id/analysis" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["type"] == "file_analysis"' && \
        curl -fsS "$base/api/v1/files/$structured_file_id/analysis" | python -c 'import json,sys; assert any(x["type"]=="archive_analysis" for x in json.load(sys.stdin)["result"]["structured"])' && \
-       curl -fsS "$base/api/v1/files/$binary_file_id/candidates" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]'; then
+       curl -fsS "$base/api/v1/files/$binary_file_id/candidates" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]' && \
+       curl -fsS "$base/api/v1/files/$m44_file_id/detections" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]'; then
         record "persistence" PASS ""
     else
         record "persistence" FAIL "case did not survive restart"
@@ -275,6 +314,7 @@ else
     record "M4.1 upload runtime" SKIPPED "Docker runtime was not available"
     record "M4.2 structured runtime" SKIPPED "Docker runtime was not available"
     record "M4.3 binary runtime" SKIPPED "Docker runtime was not available"
+    record "M4.4 detection runtime" SKIPPED "Docker runtime was not available"
     record "persistence" SKIPPED "Docker runtime was not available"
 fi
 [ -z "${OSINT_TOOLS_PORT_PUBLISHED+x}" ] || docker compose -p "$docker_project" down -v >/dev/null 2>&1 || true
@@ -287,6 +327,16 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker im
     fi
 else
     record "M4.3 offline analysis" SKIPPED "Docker runtime image is unavailable"
+fi
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker image inspect osint-tools:dev >/dev/null 2>&1; then
+    if docker run --rm --network none --entrypoint python osint-tools:dev -c 'import io,tempfile,pathlib; from osint_tools.storage import Store; from osint_tools.files.store import ContentStore; from osint_tools.files.service import ingest_file; d=pathlib.Path(tempfile.mkdtemp()); s=Store(d/"db"); o=ContentStore(d/"files"); c=s.create_case("offline"); x=b"OSINT_TOOLS_DEMO_SIGNATURE"; f=ingest_file(s,o,c["id"],io.BytesIO(x),len(x),"x",100); assert s.list_file_detections(f["id"])[0]["method"]=="yara"' >/dev/null; then
+        record "M4.4 offline analysis" PASS ""
+    else
+        record "M4.4 offline analysis" FAIL "network-none detection invocation failed"
+    fi
+else
+    record "M4.4 offline analysis" SKIPPED "Docker runtime image is unavailable"
 fi
 
 podman_name="osint-tools-qualify-$$"
@@ -302,7 +352,7 @@ if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
             podman_target=$(curl -fsS -H 'Content-Type: application/json' -d '{"value":"1.1.1.1"}' "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/targets" 2>/dev/null || true)
             podman_upload=$(printf 'podman fixture' | curl -fsS -X POST -H 'X-Filename: podman.txt' --data-binary @- "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/files" 2>/dev/null || true)
             if podman exec "$podman_name" test -w /data; then record "Podman /data write" PASS ""; else record "Podman /data write" FAIL "/data is not writable"; fi
-            if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && [ -n "$podman_upload" ] && podman exec "$podman_name" python -c 'import PIL, osint_tools.files.pe, osint_tools.files.elf, osint_tools.files.macho, osint_tools.files.amiga_hunk' && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
+            if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && [ -n "$podman_upload" ] && podman exec "$podman_name" python -c 'import PIL, osint_tools.files.pe, osint_tools.files.elf, osint_tools.files.macho, osint_tools.files.amiga_hunk, osint_tools.files.yara_engine, osint_tools.files.similarity' && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
                 record "Podman runtime/non-root" PASS ""
                 record "Podman parser imports" PASS ""
             else
