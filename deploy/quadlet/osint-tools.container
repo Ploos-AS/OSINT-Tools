@@ -1,0 +1,16 @@
+[Unit]
+Description=OSINT Tools
+After=network-online.target
+
+[Container]
+Image=localhost/osint-tools:dev
+ContainerName=osint-tools
+PublishPort=8080:8080
+Volume=osint-tools-data.volume:/data:Z
+NoNewPrivileges=true
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

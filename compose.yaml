@@ -1,0 +1,16 @@
+services:
+  osint-tools:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: osint-tools:dev
+    ports:
+      - "8080:8080"
+    volumes:
+      - osint-tools-data:/data
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  osint-tools-data:
