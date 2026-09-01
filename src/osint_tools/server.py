@@ -8,16 +8,19 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .core import dns_lookup, http_inspect, ip_info, mail_domain, rdap_lookup, target_dict, detect_target, tls_inspect
 from .pivots import pivot_dns
+from .provider_service import execute_provider
+from .providers import ProviderError, builtin_registry
 from .storage import Store
 
 HOST = os.environ.get("OSINT_TOOLS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("OSINT_TOOLS_PORT", "8080"))
 DATA_DIR = os.environ.get("OSINT_TOOLS_DATA_DIR", "/data")
 STORE = Store(os.path.join(DATA_DIR, "osint-tools.db"))
+PROVIDERS = builtin_registry()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.2"
+    server_version = "OSINT-Tools/0.3"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -51,7 +54,12 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M2", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite"})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M3.1", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite"})
+            if parsed.path == "/api/v1/providers":
+                return self._json(200, {"ok": True, "result": [provider.status() for provider in PROVIDERS.list()]})
+            if len(parts) == 4 and parts[:3] == ["api", "v1", "providers"]:
+                provider = PROVIDERS.get(parts[3])
+                return self._json(200, {"ok": True, "result": provider.status()}) if provider else self._provider_error(ProviderError("unknown_provider", "provider not found", status=404))
             if parsed.path == "/api/v1/target":
                 return self._json(200, {"ok": True, "result": target_dict(detect_target(self._required(q, "value")))})
             if parsed.path == "/api/v1/ip":
@@ -78,8 +86,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"ok": False, "error": "not found"})
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
-        except Exception as exc:
-            return self._json(502, {"ok": False, "error": str(exc)})
+        except Exception:
+            return self._json(502, {"ok": False, "error": {"code": "request_failed", "message": "request failed"}})
 
     def do_POST(self):
         _, parts = self._parts()
@@ -105,11 +113,16 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 6 and parts[:3] == ["api", "v1", "targets"] and parts[4:] == ["pivot", "dns"]:
                 result = pivot_dns(STORE, int(parts[3]))
                 return self._json(200, {"ok": True, "result": result})
+            if len(parts) == 7 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "providers":
+                result = execute_provider(STORE, PROVIDERS, int(parts[3]), parts[5], parts[6])
+                return self._json(201, {"ok": True, "result": result})
             return self._json(404, {"ok": False, "error": "not found"})
+        except ProviderError as exc:
+            return self._provider_error(exc)
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
-        except Exception as exc:
-            return self._json(502, {"ok": False, "error": str(exc)})
+        except Exception:
+            return self._json(502, {"ok": False, "error": {"code": "request_failed", "message": "request failed"}})
 
     def do_PATCH(self):
         _, parts = self._parts()
@@ -135,9 +148,12 @@ class Handler(BaseHTTPRequestHandler):
             raise ValueError(f"{key} is required")
         return value
 
+    def _provider_error(self, exc: ProviderError):
+        return self._json(exc.status, {"ok": False, "error": exc.payload()})
+
 
 def main() -> None:
-    print(f"OSINT Tools M2 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M3.1 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
