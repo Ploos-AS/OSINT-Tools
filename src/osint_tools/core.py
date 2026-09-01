@@ -1,86 +1,158 @@
 from __future__ import annotations
-import hashlib, ipaddress, json, re, socket, ssl, urllib.parse, urllib.request
-from dataclasses import dataclass, asdict
 
-UA = 'OSINT-Tools/0.1 (+passive-osint)'
+import hashlib
+import ipaddress
+import json
+import socket
+import ssl
+import urllib.parse
+import urllib.request
+from dataclasses import dataclass
+from typing import Any
 
-@dataclass
+import dns.resolver
+
+
+@dataclass(frozen=True)
 class Target:
     type: str
     value: str
     normalized: str
 
+
 def detect_target(value: str) -> Target:
-    raw=value.strip()
-    if not raw: raise ValueError('empty target')
+    raw = value.strip()
+    if not raw:
+        raise ValueError("target is required")
     try:
-        ip=ipaddress.ip_address(raw); return Target('ip', raw, ip.compressed)
-    except ValueError: pass
-    p=urllib.parse.urlparse(raw if '://' in raw else '//' + raw)
-    if '://' in raw and p.hostname:
-        return Target('url', raw, urllib.parse.urlunparse(p._replace(fragment='')))
-    domain=raw.rstrip('.').lower()
-    if re.fullmatch(r'(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', domain):
-        return Target('domain', raw, domain)
-    raise ValueError('unsupported target')
+        ip = ipaddress.ip_address(raw)
+        return Target("ip", raw, ip.compressed)
+    except ValueError:
+        pass
+    parsed = urllib.parse.urlsplit(raw)
+    if parsed.scheme in {"http", "https"} and parsed.hostname:
+        normalized = urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
+        )
+        return Target("url", raw, normalized)
+    candidate = raw.rstrip(".").lower()
+    if candidate and "." in candidate and all(part and len(part) <= 63 for part in candidate.split(".")):
+        allowed = set("abcdefghijklmnopqrstuvwxyz0123456789-")
+        if all(set(part) <= allowed and not part.startswith("-") and not part.endswith("-") for part in candidate.split(".")):
+            return Target("domain", raw, candidate)
+    raise ValueError("unsupported target")
 
-def ip_info(value: str):
-    ip=ipaddress.ip_address(value)
-    return {'ip':ip.compressed,'version':ip.version,'is_private':ip.is_private,'is_global':ip.is_global,
-            'is_loopback':ip.is_loopback,'is_link_local':ip.is_link_local,'is_multicast':ip.is_multicast,
-            'is_reserved':ip.is_reserved,'reverse_pointer':ip.reverse_pointer}
 
-def dns_lookup(domain: str):
-    import dns.resolver
-    out={}
-    for typ in ('A','AAAA','CNAME','MX','NS','TXT','SOA','CAA'):
+def target_dict(target: Target) -> dict[str, str]:
+    return {"type": target.type, "value": target.value, "normalized": target.normalized}
+
+
+def ip_info(value: str) -> dict[str, Any]:
+    ip = ipaddress.ip_address(value.strip())
+    return {
+        "ip": ip.compressed,
+        "version": ip.version,
+        "is_private": ip.is_private,
+        "is_global": ip.is_global,
+        "is_loopback": ip.is_loopback,
+        "is_link_local": ip.is_link_local,
+        "is_multicast": ip.is_multicast,
+        "is_reserved": ip.is_reserved,
+        "reverse_pointer": ip.reverse_pointer,
+    }
+
+
+def dns_lookup(domain: str) -> dict[str, Any]:
+    domain = domain.strip().rstrip(".").lower()
+    records: dict[str, list[str]] = {}
+    for record_type in ("A", "AAAA", "CNAME", "MX", "NS", "TXT", "SOA", "CAA"):
         try:
-            ans=dns.resolver.resolve(domain, typ, lifetime=5)
-            out[typ]=[r.to_text() for r in ans]
-        except Exception as e: out[typ]=[]
-    return {'domain':domain,'records':out}
+            answers = dns.resolver.resolve(domain, record_type)
+            records[record_type] = [answer.to_text() for answer in answers]
+        except Exception:
+            records[record_type] = []
+    return {"domain": domain, "records": records}
 
-def rdap_lookup(value: str):
-    try: ipaddress.ip_address(value); url='https://rdap.org/ip/'+urllib.parse.quote(value)
-    except ValueError: url='https://rdap.org/domain/'+urllib.parse.quote(value)
-    req=urllib.request.Request(url,headers={'User-Agent':UA,'Accept':'application/rdap+json, application/json'})
-    with urllib.request.urlopen(req,timeout=10) as r: return json.load(r)
 
-def _public_host(host: str):
-    infos=socket.getaddrinfo(host,None,type=socket.SOCK_STREAM)
-    ips=sorted({x[4][0] for x in infos})
-    if not ips: raise ValueError('host did not resolve')
-    for s in ips:
-        ip=ipaddress.ip_address(s)
-        if not ip.is_global: raise ValueError('non-public destination blocked')
-    return ips
+def rdap_lookup(value: str) -> Any:
+    target = detect_target(value)
+    if target.type == "ip":
+        path = f"ip/{urllib.parse.quote(target.normalized, safe='')}"
+    elif target.type == "domain":
+        path = f"domain/{urllib.parse.quote(target.normalized, safe='')}"
+    else:
+        raise ValueError("RDAP supports domain or IP targets")
+    req = urllib.request.Request(f"https://rdap.org/{path}", headers={"User-Agent": "OSINT-Tools/0.2"})
+    with urllib.request.urlopen(req, timeout=15) as response:
+        return json.load(response)
 
-def http_inspect(url: str):
-    p=urllib.parse.urlparse(url)
-    if p.scheme not in ('http','https') or not p.hostname: raise ValueError('http(s) URL required')
-    ips=_public_host(p.hostname)
-    req=urllib.request.Request(url,method='HEAD',headers={'User-Agent':UA})
+
+def _public_host(host: str) -> list[str]:
+    resolved: list[str] = []
+    for family, _, _, _, sockaddr in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM):
+        address = sockaddr[0]
+        ip = ipaddress.ip_address(address)
+        if not ip.is_global:
+            raise ValueError(f"non-public destination blocked: {address}")
+        if address not in resolved:
+            resolved.append(address)
+    if not resolved:
+        raise ValueError("hostname did not resolve")
+    return resolved
+
+
+def http_inspect(url: str) -> dict[str, Any]:
+    from .http_safe import safe_head
+
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("only http(s) URLs are supported")
+    initial_ips = _public_host(parsed.hostname)
+    response, visited = safe_head(url)
     try:
-        with urllib.request.urlopen(req,timeout=10) as r:
-            return {'requested_url':url,'final_url':r.geturl(),'status':r.status,'resolved_ips':ips,'headers':dict(r.headers.items())}
-    except urllib.error.HTTPError as e:
-        return {'requested_url':url,'final_url':e.geturl(),'status':e.code,'resolved_ips':ips,'headers':dict(e.headers.items())}
+        final_url = response.geturl()
+        final_host = urllib.parse.urlsplit(final_url).hostname
+        final_ips = _public_host(final_host) if final_host else []
+        return {
+            "requested_url": url,
+            "final_url": final_url,
+            "status": response.status,
+            "resolved_ips": final_ips or initial_ips,
+            "redirect_chain": visited,
+            "headers": dict(response.headers.items()),
+        }
+    finally:
+        response.close()
 
-def tls_inspect(host: str, port: int=443):
+
+def tls_inspect(host: str, port: int = 443) -> dict[str, Any]:
     _public_host(host)
-    ctx=ssl.create_default_context()
-    with socket.create_connection((host,port),timeout=10) as raw:
-        with ctx.wrap_socket(raw,server_hostname=host) as s:
-            cert=s.getpeercert(); der=s.getpeercert(binary_form=True)
-            return {'host':host,'port':port,'protocol':s.version(),'cipher':s.cipher(),
-                    'sha256':hashlib.sha256(der).hexdigest(), 'subject':cert.get('subject'),
-                    'issuer':cert.get('issuer'),'notBefore':cert.get('notBefore'),'notAfter':cert.get('notAfter'),
-                    'subjectAltName':cert.get('subjectAltName',())}
+    context = ssl.create_default_context()
+    with socket.create_connection((host, port), timeout=10) as sock:
+        with context.wrap_socket(sock, server_hostname=host) as tls:
+            cert_bin = tls.getpeercert(binary_form=True)
+            cert = tls.getpeercert()
+            return {
+                "host": host,
+                "port": port,
+                "protocol": tls.version(),
+                "cipher": tls.cipher(),
+                "sha256": hashlib.sha256(cert_bin).hexdigest(),
+                "subject": cert.get("subject", []),
+                "issuer": cert.get("issuer", []),
+                "notBefore": cert.get("notBefore"),
+                "notAfter": cert.get("notAfter"),
+                "subjectAltName": cert.get("subjectAltName", []),
+            }
 
-def mail_domain(domain: str):
-    d=dns_lookup(domain)['records']
-    spf=[x for x in d['TXT'] if 'v=spf1' in x.lower()]
-    dmarc=dns_lookup('_dmarc.'+domain)['records']['TXT']
-    return {'domain':domain,'mx':d['MX'],'spf':spf,'dmarc':dmarc}
 
-def target_dict(value: str): return asdict(detect_target(value))
+def mail_domain(domain: str) -> dict[str, Any]:
+    domain = domain.strip().rstrip(".").lower()
+    dns = dns_lookup(domain)
+    dmarc = dns_lookup(f"_dmarc.{domain}")
+    return {
+        "domain": domain,
+        "mx": dns["records"].get("MX", []),
+        "spf": [v for v in dns["records"].get("TXT", []) if "v=spf1" in v.lower()],
+        "dmarc": [v for v in dmarc["records"].get("TXT", []) if "v=dmarc1" in v.lower()],
+    }
