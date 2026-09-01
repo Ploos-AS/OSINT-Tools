@@ -9,6 +9,8 @@ from . import __version__
 from .core import dns_lookup, http_inspect, ip_info, mail_domain, rdap_lookup, target_dict, detect_target, tls_inspect
 from .files import ContentStore, FileError, ingest_file
 from .files.budget import AnalysisLimits
+from .files.binary_common import BinaryLimits
+from .files.candidates import promote_candidate
 from .pivots import pivot_dns
 from .provider_service import enrich_target, execute_provider
 from .providers import ProviderError, builtin_registry
@@ -29,10 +31,21 @@ ANALYSIS_LIMITS = AnalysisLimits(
     max_ratio=float(os.environ.get("OSINT_TOOLS_ARCHIVE_MAX_RATIO", "100")),
     max_image_pixels=int(os.environ.get("OSINT_TOOLS_IMAGE_MAX_PIXELS", "40000000")),
 )
+BINARY_LIMITS = BinaryLimits(
+    max_scan_bytes=int(os.environ.get("OSINT_TOOLS_BINARY_MAX_SCAN_BYTES", str(16 * 1024 * 1024))),
+    max_strings=int(os.environ.get("OSINT_TOOLS_BINARY_MAX_STRINGS", "2000")),
+    min_string_length=int(os.environ.get("OSINT_TOOLS_BINARY_MIN_STRING_LENGTH", "4")),
+    max_string_length=int(os.environ.get("OSINT_TOOLS_BINARY_MAX_STRING_LENGTH", "1024")),
+    max_sections=int(os.environ.get("OSINT_TOOLS_BINARY_MAX_SECTIONS", "256")),
+    max_symbols=int(os.environ.get("OSINT_TOOLS_BINARY_MAX_SYMBOLS", "2000")),
+    max_imports=int(os.environ.get("OSINT_TOOLS_BINARY_MAX_IMPORTS", "1000")),
+    max_exports=int(os.environ.get("OSINT_TOOLS_BINARY_MAX_EXPORTS", "1000")),
+    max_candidates=int(os.environ.get("OSINT_TOOLS_BINARY_MAX_CANDIDATES", "500")),
+)
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.4.2"
+    server_version = "OSINT-Tools/0.4.3"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -66,13 +79,22 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M4.2", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M4.3", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "files"]:
                 result = STORE.get_file(int(parts[3]))
                 return self._json(200, {"ok": True, "result": result}) if result else self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "files"] and parts[4] == "analysis":
                 result = STORE.get_file_analysis(int(parts[3]))
                 return self._json(200, {"ok": True, "result": result}) if result else self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "files"] and parts[4] == "candidates":
+                candidate_type = q.get("type", [None])[0]
+                if candidate_type and candidate_type not in {"url", "domain", "ipv4", "ipv6", "email"}:
+                    raise ValueError("unsupported candidate type")
+                try:
+                    result = STORE.list_file_candidates(int(parts[3]), candidate_type, int(q.get("limit", ["100"])[0]), int(q.get("offset", ["0"])[0]))
+                except KeyError:
+                    return self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
+                return self._json(200, {"ok": True, "result": result})
             if parsed.path == "/api/v1/providers":
                 return self._json(200, {"ok": True, "result": [provider.status() for provider in PROVIDERS.list()]})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "providers"]:
@@ -120,8 +142,10 @@ class Handler(BaseHTTPRequestHandler):
                     content_length = int(raw_length)
                 except ValueError:
                     raise FileError("invalid_content_length", "content length must be an integer", 400) from None
-                result = ingest_file(STORE, FILE_STORE, int(parts[3]), self.rfile, content_length, self.headers.get("X-Filename", "unnamed"), MAX_UPLOAD_BYTES, ANALYSIS_LIMITS)
+                result = ingest_file(STORE, FILE_STORE, int(parts[3]), self.rfile, content_length, self.headers.get("X-Filename", "unnamed"), MAX_UPLOAD_BYTES, ANALYSIS_LIMITS, BINARY_LIMITS)
                 return self._json(201, {"ok": True, "result": result})
+            if len(parts) == 7 and parts[:3] == ["api", "v1", "files"] and parts[4] == "candidates" and parts[6] == "promote":
+                return self._json(200, {"ok": True, "result": promote_candidate(STORE, int(parts[3]), int(parts[5]))})
             body = self._body()
             if parts == ["api", "v1", "cases"]:
                 name = str(body.get("name", "")).strip()
@@ -187,7 +211,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M4.2 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M4.3 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

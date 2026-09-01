@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 def utcnow() -> str:
@@ -118,6 +118,21 @@ class Store:
                     artifact_id INTEGER NOT NULL UNIQUE REFERENCES artifacts(id) ON DELETE CASCADE,
                     PRIMARY KEY(file_id, artifact_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS file_candidates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                    artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                    type TEXT NOT NULL,
+                    raw_value TEXT NOT NULL,
+                    normalized_value TEXT,
+                    offset INTEGER NOT NULL,
+                    encoding TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(file_id, type, raw_value, normalized_value, offset, encoding)
+                );
+                CREATE INDEX IF NOT EXISTS idx_file_candidates_file_type
+                    ON file_candidates(file_id, type, id);
                 """
             )
             relationship_columns = {row[1] for row in conn.execute("PRAGMA table_info(relationships)")}
@@ -310,3 +325,51 @@ class Store:
         with self.connect() as conn:
             conn.execute("INSERT INTO file_structured_artifacts(file_id,artifact_id) VALUES(?,?)", (file_id, artifact["id"]))
         return artifact
+
+    def add_binary_analysis(self, file_id: int, data: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any]:
+        """Atomically replace a logical file's binary analysis and candidates."""
+        file = self.get_file(file_id)
+        if file is None:
+            raise KeyError("file not found")
+        now = utcnow()
+        with self.connect() as conn:
+            old = conn.execute(
+                "SELECT a.id FROM file_structured_artifacts fsa JOIN artifacts a ON a.id=fsa.artifact_id WHERE fsa.file_id=? AND a.type='binary_analysis'",
+                (file_id,),
+            ).fetchall()
+            for row in old:
+                conn.execute("DELETE FROM artifacts WHERE id=?", (row["id"],))
+            cur = conn.execute(
+                "INSERT INTO artifacts(case_id,target_id,type,source,data_json,created_at) VALUES(?,?,?,?,?,?)",
+                (file["case_id"], file["target_id"], "binary_analysis", "local", json.dumps(data, separators=(",", ":"), sort_keys=True), now),
+            )
+            artifact_id = int(cur.lastrowid)
+            conn.execute("INSERT INTO file_structured_artifacts(file_id,artifact_id) VALUES(?,?)", (file_id, artifact_id))
+            conn.execute("DELETE FROM file_candidates WHERE file_id=?", (file_id,))
+            for candidate in candidates:
+                conn.execute(
+                    "INSERT OR IGNORE INTO file_candidates(file_id,artifact_id,type,raw_value,normalized_value,offset,encoding,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                    (file_id, artifact_id, candidate["type"], candidate["raw_value"], candidate.get("normalized_value"), candidate["offset"], candidate["encoding"], now),
+                )
+            row = conn.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+        item = dict(row)
+        item["data"] = json.loads(item.pop("data_json"))
+        return item
+
+    def list_file_candidates(self, file_id: int, candidate_type: str | None = None, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        if self.get_file(file_id) is None:
+            raise KeyError("file not found")
+        limit = max(1, min(int(limit), 200)); offset = max(0, int(offset))
+        sql = "SELECT * FROM file_candidates WHERE file_id=?"
+        args: list[Any] = [file_id]
+        if candidate_type:
+            sql += " AND type=?"; args.append(candidate_type)
+        sql += " ORDER BY id LIMIT ? OFFSET ?"; args.extend((limit, offset))
+        with self.connect() as conn:
+            rows = conn.execute(sql, args).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_file_candidate(self, file_id: int, candidate_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM file_candidates WHERE file_id=? AND id=?", (file_id, candidate_id)).fetchone()
+        return self._row(row)

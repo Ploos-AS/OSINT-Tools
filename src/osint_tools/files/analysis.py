@@ -10,8 +10,14 @@ SIGNATURES = (
     (b"\xff\xd8\xff", "jpeg", "image/jpeg", (".jpg", ".jpeg")),
     (b"PK\x03\x04", "zip", "application/zip", (".zip",)),
     (b"\x1f\x8b", "gzip", "application/gzip", (".gz", ".gzip")),
-    (b"\x7fELF", "elf", "application/x-elf", (".elf",)),
     (b"MZ", "pe", "application/vnd.microsoft.portable-executable", (".exe", ".dll")),
+    (b"\x7fELF", "elf", "application/x-elf", (".elf",)),
+    (b"\xce\xfa\xed\xfe", "macho", "application/x-mach-binary", ()),
+    (b"\xcf\xfa\xed\xfe", "macho", "application/x-mach-binary", ()),
+    (b"\xfe\xed\xfa\xce", "macho", "application/x-mach-binary", ()),
+    (b"\xfe\xed\xfa\xcf", "macho", "application/x-mach-binary", ()),
+    (b"\xca\xfe\xba\xbe", "macho", "application/x-mach-binary", ()),
+    (b"\x00\x00\x03\xf3", "amiga_hunk", "application/x-amiga-hunk", ()),
 )
 
 KNOWN_EXTENSIONS = {extension for _, _, _, extensions in SIGNATURES for extension in extensions}

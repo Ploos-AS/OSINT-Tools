@@ -46,6 +46,10 @@ run_gate "special/encrypted protection" python -m pytest -q tests/test_structure
 run_gate "image/EXIF metadata" python -m pytest -q tests/test_structured_analysis.py -k 'image or exif'
 run_gate "PDF metadata" python -m pytest -q tests/test_structured_analysis.py::test_pdf_metadata_and_active_indicator
 run_gate "office metadata" python -m pytest -q tests/test_structured_analysis.py -k 'office or odf'
+run_gate "M4.3 binary analysis" python -m pytest -q tests/test_binary_analysis.py tests/test_binary_api.py
+run_gate "binary formats/malformed" python -m pytest -q tests/test_binary_analysis.py -k 'formats_and_malformed or metadata'
+run_gate "strings/entropy/candidates" python -m pytest -q tests/test_binary_analysis.py -k 'entropy or candidate'
+run_gate "binary ZIP-child analysis" python -m pytest -q tests/test_binary_analysis.py::test_binary_child_inside_zip_uses_existing_pipeline
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
@@ -82,7 +86,8 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.4.2" and i["milestone"] == "M4.2" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.4.3" and i["milestone"] == "M4.3" and i["max_upload_bytes"] == 16384
+assert i["binary_limits"]["max_candidates"] == 500
 PY
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
     case_json=$(curl -fsS -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases") || api_ok=0
@@ -220,11 +225,43 @@ PY
     [ "$structured_ok" -eq 1 ] && record "M4.2 structured runtime" PASS "" || record "M4.2 structured runtime" FAIL "structured fixture checks failed"
     structured_file_id=$(cat "$tmp_dir/structured-id" 2>/dev/null || true)
 
+    python - "$tmp_dir" <<'PY'
+import io, struct, sys, zipfile
+from pathlib import Path
+d=Path(sys.argv[1])
+p=bytearray(0x260); p[:2]=b'MZ'; struct.pack_into('<I',p,0x3c,0x80); p[0x80:0x84]=b'PE\0\0'; struct.pack_into('<HHIIIHH',p,0x84,0x14c,1,1,0,0,224,2); o=0x98; struct.pack_into('<H',p,o,0x10b); struct.pack_into('<I',p,o+16,0x1000); struct.pack_into('<I',p,o+28,0x400000); struct.pack_into('<H',p,o+68,3); s=o+224; p[s:s+8]=b'.text\0\0\0'; payload=b'http://example.com/a admin@example.com 192.0.2.1 2001:db8::1 pivot.example'; struct.pack_into('<IIII',p,s+8,len(payload),0x1000,len(payload),0x200); struct.pack_into('<I',p,s+36,0x60000020); p[0x200:0x200+len(payload)]=payload; (d/'sample.pe').write_bytes(p)
+e=bytearray(64); e[:6]=b'\x7fELF\x02\x01'; e[6]=1; struct.pack_into('<HHIQQQIHHHHHH',e,16,2,62,1,0x401000,0,0,0,64,56,0,64,0,0); (d/'sample.elf').write_bytes(e)
+(d/'sample.macho').write_bytes(b'\xcf\xfa\xed\xfe'+struct.pack('<IIIIIII',0x01000007,3,2,0,0,0,0))
+(d/'sample.hunk').write_bytes(b''.join(struct.pack('>I',x) for x in [1011,0,1,0,0,1,1001,1,0x41424344,1010]))
+(d/'bad.exe').write_bytes(b'MZbad')
+with zipfile.ZipFile(d/'binary.zip','w') as z:z.writestr('inside.exe',p)
+PY
+    binary_ok=1
+    for fixture in sample.pe sample.elf sample.macho sample.hunk bad.exe binary.zip; do
+        upload_file "$tmp_dir/$fixture" "$fixture" >"$tmp_dir/$fixture.json" || binary_ok=0
+    done
+    python - "$base" "$tmp_dir" <<'PY' || binary_ok=0
+import json,sys,urllib.request
+base,d=sys.argv[1:]
+def get(name):
+ f=json.load(open(f'{d}/{name}.json'))['result']; a=json.load(urllib.request.urlopen(f'{base}/api/v1/files/{f["id"]}/analysis'))['result']; return f,a
+for name,kind in [('sample.pe','pe'),('sample.elf','elf'),('sample.macho','macho'),('sample.hunk','amiga_hunk')]:
+ f,a=get(name); b=next(x for x in a['structured'] if x['type']=='binary_analysis'); assert b['data']['format']==kind and b['data']['status']=='success' and isinstance(b['data']['entropy'],float)
+bad,ba=get('bad.exe'); assert next(x for x in ba['structured'] if x['type']=='binary_analysis')['data']['status']=='failed'
+pe,_=get('sample.pe'); c=json.load(urllib.request.urlopen(f'{base}/api/v1/files/{pe["id"]}/candidates'))['result']; assert {'url','domain','ipv4','ipv6','email'} <= {x['type'] for x in c}
+url=next(x for x in c if x['type']=='url'); req=urllib.request.Request(f'{base}/api/v1/files/{pe["id"]}/candidates/{url["id"]}/promote',data=b'{}',method='POST'); promoted=json.load(urllib.request.urlopen(req))['result']; assert promoted['relationship']['relation']=='contains_indicator'
+z,za=get('binary.zip'); arc=next(x for x in za['structured'] if x['type']=='archive_analysis'); child=arc['data']['members'][0]['child_file_id']; ca=json.load(urllib.request.urlopen(f'{base}/api/v1/files/{child}/analysis'))['result']; assert any(x['type']=='binary_analysis' for x in ca['structured'])
+open(f'{d}/binary-id','w').write(str(pe['id']))
+PY
+    [ "$binary_ok" -eq 1 ] && record "M4.3 binary runtime" PASS "" || record "M4.3 binary runtime" FAIL "binary format/candidate/promotion checks failed"
+    binary_file_id=$(cat "$tmp_dir/binary-id" 2>/dev/null || true)
+
     if docker compose -p "$docker_project" restart >/dev/null && \
        i=0; while [ "$i" -lt 30 ]; do curl -fsS "$base/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done; \
        curl -fsS "$base/api/v1/cases/$case_id" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["name"] == "qualification"' && \
        curl -fsS "$base/api/v1/files/$text_file_id/analysis" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["type"] == "file_analysis"' && \
-       curl -fsS "$base/api/v1/files/$structured_file_id/analysis" | python -c 'import json,sys; assert any(x["type"]=="archive_analysis" for x in json.load(sys.stdin)["result"]["structured"])'; then
+       curl -fsS "$base/api/v1/files/$structured_file_id/analysis" | python -c 'import json,sys; assert any(x["type"]=="archive_analysis" for x in json.load(sys.stdin)["result"]["structured"])' && \
+       curl -fsS "$base/api/v1/files/$binary_file_id/candidates" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]'; then
         record "persistence" PASS ""
     else
         record "persistence" FAIL "case did not survive restart"
@@ -237,9 +274,20 @@ else
     record "M3.2 enrichment runtime" SKIPPED "Docker runtime was not available"
     record "M4.1 upload runtime" SKIPPED "Docker runtime was not available"
     record "M4.2 structured runtime" SKIPPED "Docker runtime was not available"
+    record "M4.3 binary runtime" SKIPPED "Docker runtime was not available"
     record "persistence" SKIPPED "Docker runtime was not available"
 fi
 [ -z "${OSINT_TOOLS_PORT_PUBLISHED+x}" ] || docker compose -p "$docker_project" down -v >/dev/null 2>&1 || true
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker image inspect osint-tools:dev >/dev/null 2>&1; then
+    if docker run --rm --network none --entrypoint python osint-tools:dev -c 'import struct,tempfile,pathlib; from osint_tools.files.binary import analyze_binary; p=pathlib.Path(tempfile.mkstemp()[1]); p.write_bytes(b"\xcf\xfa\xed\xfe"+struct.pack("<IIIIIII",0x01000007,3,2,0,0,0,0)); assert analyze_binary(p,"macho",__import__("osint_tools.files.binary_common",fromlist=["BinaryLimits"]).BinaryLimits())[0]["status"]=="success"' >/dev/null; then
+        record "M4.3 offline analysis" PASS ""
+    else
+        record "M4.3 offline analysis" FAIL "network-none parser invocation failed"
+    fi
+else
+    record "M4.3 offline analysis" SKIPPED "Docker runtime image is unavailable"
+fi
 
 podman_name="osint-tools-qualify-$$"
 if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
@@ -254,19 +302,23 @@ if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
             podman_target=$(curl -fsS -H 'Content-Type: application/json' -d '{"value":"1.1.1.1"}' "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/targets" 2>/dev/null || true)
             podman_upload=$(printf 'podman fixture' | curl -fsS -X POST -H 'X-Filename: podman.txt' --data-binary @- "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/files" 2>/dev/null || true)
             if podman exec "$podman_name" test -w /data; then record "Podman /data write" PASS ""; else record "Podman /data write" FAIL "/data is not writable"; fi
-            if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && [ -n "$podman_upload" ] && podman exec "$podman_name" python -c 'import PIL' && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
+            if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && [ -n "$podman_upload" ] && podman exec "$podman_name" python -c 'import PIL, osint_tools.files.pe, osint_tools.files.elf, osint_tools.files.macho, osint_tools.files.amiga_hunk' && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
                 record "Podman runtime/non-root" PASS ""
+                record "Podman parser imports" PASS ""
             else
                 record "Podman runtime/non-root" FAIL "health/API/UID verification failed"
+                record "Podman parser imports" FAIL "parser import or runtime verification failed"
             fi
         else
             record "Podman runtime/non-root" FAIL "container failed to start"
             record "Podman /data write" SKIPPED "Podman container did not start"
+            record "Podman parser imports" SKIPPED "Podman container did not start"
         fi
     else
         record "Podman build" FAIL "build failed"
         record "Podman runtime/non-root" SKIPPED "Podman image did not build"
         record "Podman /data write" SKIPPED "Podman image did not build"
+        record "Podman parser imports" SKIPPED "Podman image did not build"
     fi
     podman rm -f "$podman_name" >/dev/null 2>&1 || true
     podman rmi "$podman_name" >/dev/null 2>&1 || true
@@ -274,6 +326,7 @@ else
     record "Podman build" SKIPPED "Podman is unavailable"
     record "Podman runtime/non-root" SKIPPED "Podman is unavailable"
     record "Podman /data write" SKIPPED "Podman is unavailable"
+    record "Podman parser imports" SKIPPED "Podman is unavailable"
 fi
 
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker buildx inspect --bootstrap >/tmp/osint-tools-buildx-$$ 2>&1; then
