@@ -29,12 +29,20 @@ run_gate "M3.2 provider registry" python -m pytest -q tests/test_m32_providers.p
 run_gate "M3.2 generic enrichment" python -m pytest -q tests/test_enrichment.py tests/test_provider_api.py
 run_gate "artifact persistence" python -m pytest -q tests/test_storage.py tests/test_enrichment.py
 run_gate "derived pivot persistence" python -m pytest -q tests/test_enrichment.py::test_generic_enrichment_partial_success_and_pivot_provenance
+run_gate "M4.1 file foundation" python -m pytest -q tests/test_files.py tests/test_provider_api.py
+run_gate "hash verification" python -m pytest -q tests/test_files.py::test_streaming_hashes_zero_and_exact_limit
+run_gate "type detection" python -m pytest -q tests/test_files.py::test_type_detection_and_extension_mismatch
+run_gate "hostile filename protection" python -m pytest -q tests/test_files.py -k hostile
+run_gate "oversize/partial cleanup" python -m pytest -q tests/test_files.py::test_oversize_and_incomplete_cleanup
+run_gate "content deduplication" python -m pytest -q tests/test_files.py::test_content_addressing_and_physical_deduplication
+run_gate "file persistence" python -m pytest -q tests/test_files.py::test_file_association_artifact_persistence_and_hash_pivot
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
 docker_ready=0
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     export OSINT_TOOLS_PORT_PUBLISHED=$docker_port
+    export OSINT_TOOLS_MAX_UPLOAD_BYTES=1024
     if docker compose -p "$docker_project" build; then
         record "Docker build" PASS ""
         if docker compose -p "$docker_project" up -d && \
@@ -62,7 +70,7 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.3.2" and i["milestone"] == "M3.2"
+assert i["version"] == "0.4.1" and i["milestone"] == "M4.1" and i["max_upload_bytes"] == 1024
 PY
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
     case_json=$(curl -fsS -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases") || api_ok=0
@@ -104,9 +112,45 @@ assert all(item["reason"]["code"] == "provider_not_configured" for item in r["re
 PY
     [ "$enrich_ok" -eq 1 ] && record "M3.2 enrichment runtime" PASS "" || record "M3.2 enrichment runtime" FAIL "generic enrichment contract failed"
 
+    m4_ok=1
+    : >"$tmp_dir/empty"
+    printf 'deterministic text fixture\n' >"$tmp_dir/text"
+    printf '\211PNG\r\n\032\nfixture' >"$tmp_dir/image"
+    cp "$tmp_dir/text" "$tmp_dir/duplicate"
+    text_sha=$(sha256sum "$tmp_dir/text" | cut -d' ' -f1)
+    text_md5=$(md5sum "$tmp_dir/text" | cut -d' ' -f1)
+    text_sha1=$(sha1sum "$tmp_dir/text" | cut -d' ' -f1)
+    upload_file() { curl -fsS -X POST -H "X-Filename: $2" -H 'Content-Type: application/octet-stream' --data-binary "@$1" "$base/api/v1/cases/$case_id/files"; }
+    upload_file "$tmp_dir/empty" "empty.bin" >"$tmp_dir/empty.json" || m4_ok=0
+    upload_file "$tmp_dir/text" "notes.txt" >"$tmp_dir/text.json" || m4_ok=0
+    upload_file "$tmp_dir/image" "image.png" >"$tmp_dir/image.json" || m4_ok=0
+    upload_file "$tmp_dir/duplicate" "different-name.txt" >"$tmp_dir/duplicate.json" || m4_ok=0
+    upload_file "$tmp_dir/text" "../../etc/passwd" >"$tmp_dir/hostile.json" || m4_ok=0
+    python - "$tmp_dir/text.json" "$tmp_dir/duplicate.json" "$tmp_dir/image.json" "$tmp_dir/hostile.json" "$text_sha" "$text_md5" "$text_sha1" <<'PY' || m4_ok=0
+import json, sys
+a, b, image, hostile = (json.load(open(path))["result"] for path in sys.argv[1:5])
+assert a["sha256"] == sys.argv[5] and a["md5"] == sys.argv[6] and a["sha1"] == sys.argv[7]
+assert a["storage_id"] == b["storage_id"] and a["id"] != b["id"]
+assert image["detected_type"] == "png" and image["mime_type"] == "image/png"
+assert hostile["original_filename"] == "../../etc/passwd"
+assert hostile["storage_id"].startswith("sha256/") and ".." not in hostile["storage_id"]
+PY
+    text_file_id=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["id"])' "$tmp_dir/text.json") || m4_ok=0
+    curl -fsS "$base/api/v1/files/$text_file_id/analysis" >"$tmp_dir/analysis.json" || m4_ok=0
+    object_count=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
+    [ "$object_count" -eq 3 ] || m4_ok=0
+    dd if=/dev/zero of="$tmp_dir/oversized" bs=1025 count=1 >/dev/null 2>&1
+    code=$(curl -sS -o "$tmp_dir/oversized.json" -w '%{http_code}' -X POST -H 'X-Filename: too-large.bin' --data-binary "@$tmp_dir/oversized" "$base/api/v1/cases/$case_id/files") || true
+    [ "$code" = 413 ] || m4_ok=0
+    object_count_after=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
+    temporary_count=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/.tmp -type f | wc -l') || m4_ok=0
+    [ "$object_count_after" -eq 3 ] && [ "$temporary_count" -eq 0 ] || m4_ok=0
+    [ "$m4_ok" -eq 1 ] && record "M4.1 upload runtime" PASS "" || record "M4.1 upload runtime" FAIL "upload/hash/type/dedup/oversize checks failed"
+
     if docker compose -p "$docker_project" restart >/dev/null && \
        i=0; while [ "$i" -lt 30 ]; do curl -fsS "$base/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done; \
-       curl -fsS "$base/api/v1/cases/$case_id" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["name"] == "qualification"'; then
+       curl -fsS "$base/api/v1/cases/$case_id" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["name"] == "qualification"' && \
+       curl -fsS "$base/api/v1/files/$text_file_id/analysis" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["type"] == "file_analysis"'; then
         record "persistence" PASS ""
     else
         record "persistence" FAIL "case did not survive restart"
@@ -117,6 +161,7 @@ else
     record "M2 regression" SKIPPED "Docker runtime was not available"
     record "M3.1 provider framework runtime" SKIPPED "Docker runtime was not available"
     record "M3.2 enrichment runtime" SKIPPED "Docker runtime was not available"
+    record "M4.1 upload runtime" SKIPPED "Docker runtime was not available"
     record "persistence" SKIPPED "Docker runtime was not available"
 fi
 [ -z "${OSINT_TOOLS_PORT_PUBLISHED+x}" ] || docker compose -p "$docker_project" down -v >/dev/null 2>&1 || true
@@ -125,30 +170,49 @@ podman_name="osint-tools-qualify-$$"
 if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
     if podman build -t "$podman_name" -f Containerfile .; then
         record "Podman build" PASS ""
-        if podman run -d --name "$podman_name" -p 127.0.0.1::8080 "$podman_name" >/dev/null; then
+        if podman run -d --name "$podman_name" -e OSINT_TOOLS_MAX_UPLOAD_BYTES=1024 -p 127.0.0.1::8080 "$podman_name" >/dev/null; then
             host_port=$(podman port "$podman_name" 8080/tcp | sed 's/.*://')
             i=0; while [ "$i" -lt 30 ]; do curl -fsS "http://127.0.0.1:$host_port/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done
             uid=$(podman exec "$podman_name" id -u 2>/dev/null || true)
             podman_case=$(curl -fsS -H 'Content-Type: application/json' -d '{"name":"podman-qualification"}' "http://127.0.0.1:$host_port/api/v1/cases" 2>/dev/null || true)
             podman_case_id=$(printf '%s' "$podman_case" | python -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])' 2>/dev/null || true)
             podman_target=$(curl -fsS -H 'Content-Type: application/json' -d '{"value":"1.1.1.1"}' "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/targets" 2>/dev/null || true)
-            if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
+            podman_upload=$(printf 'podman fixture' | curl -fsS -X POST -H 'X-Filename: podman.txt' --data-binary @- "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/files" 2>/dev/null || true)
+            if podman exec "$podman_name" test -w /data; then record "Podman /data write" PASS ""; else record "Podman /data write" FAIL "/data is not writable"; fi
+            if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && [ -n "$podman_upload" ] && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
                 record "Podman runtime/non-root" PASS ""
             else
                 record "Podman runtime/non-root" FAIL "health/API/UID verification failed"
             fi
         else
             record "Podman runtime/non-root" FAIL "container failed to start"
+            record "Podman /data write" SKIPPED "Podman container did not start"
         fi
     else
         record "Podman build" FAIL "build failed"
         record "Podman runtime/non-root" SKIPPED "Podman image did not build"
+        record "Podman /data write" SKIPPED "Podman image did not build"
     fi
     podman rm -f "$podman_name" >/dev/null 2>&1 || true
     podman rmi "$podman_name" >/dev/null 2>&1 || true
 else
     record "Podman build" SKIPPED "Podman is unavailable"
     record "Podman runtime/non-root" SKIPPED "Podman is unavailable"
+    record "Podman /data write" SKIPPED "Podman is unavailable"
+fi
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker buildx inspect --bootstrap >/tmp/osint-tools-buildx-$$ 2>&1; then
+    for arch in amd64 arm64; do
+        if grep -q "linux/$arch" /tmp/osint-tools-buildx-$$; then
+            if docker buildx build --platform "linux/$arch" --output type=cacheonly -f Containerfile . >/dev/null; then record "linux/$arch build" PASS ""; else record "linux/$arch build" FAIL "cross-build failed"; fi
+        else
+            record "linux/$arch build" SKIPPED "buildx builder does not advertise linux/$arch"
+        fi
+    done
+    rm -f /tmp/osint-tools-buildx-$$
+else
+    record "linux/amd64 build" SKIPPED "Docker buildx builder is unavailable"
+    record "linux/arm64 build" SKIPPED "Docker buildx builder is unavailable"
 fi
 
 live_provider() {

@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 def utcnow() -> str:
@@ -89,6 +89,28 @@ class Store:
                     body TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS file_objects (
+                    sha256 TEXT PRIMARY KEY,
+                    storage_id TEXT NOT NULL UNIQUE,
+                    size INTEGER NOT NULL,
+                    md5 TEXT NOT NULL,
+                    sha1 TEXT NOT NULL,
+                    detected_type TEXT NOT NULL,
+                    mime_type TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                    target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    artifact_id INTEGER NOT NULL REFERENCES artifacts(id) ON DELETE CASCADE,
+                    object_sha256 TEXT NOT NULL REFERENCES file_objects(sha256),
+                    original_filename TEXT NOT NULL,
+                    extension TEXT NOT NULL,
+                    ingested_at TEXT NOT NULL
                 );
                 """
             )
@@ -223,3 +245,49 @@ class Store:
             )
             row = conn.execute("SELECT * FROM notes WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row)
+
+    def add_file_ingestion(self, case_id: int, filename: str, analysis: dict[str, Any]) -> dict[str, Any]:
+        hashes = analysis["hashes"]
+        with self.connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO file_objects(sha256,storage_id,size,md5,sha1,detected_type,mime_type,created_at) VALUES(?,?,?,?,?,?,?,?)",
+                (hashes["sha256"], analysis["storage_id"], analysis["size"], hashes["md5"], hashes["sha1"], analysis["detected_type"], analysis["mime_type"], analysis["ingested_at"]),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO targets(case_id,type,value,normalized,created_at) VALUES(?,?,?,?,?)",
+                (case_id, "hash", hashes["sha256"], hashes["sha256"], analysis["ingested_at"]),
+            )
+            target = conn.execute("SELECT * FROM targets WHERE case_id=? AND type='hash' AND normalized=?", (case_id, hashes["sha256"])).fetchone()
+            if target is None:
+                raise KeyError("case not found")
+            cur = conn.execute(
+                "INSERT INTO artifacts(case_id,target_id,type,source,data_json,created_at) VALUES(?,?,?,?,?,?)",
+                (case_id, target["id"], "file_analysis", "local", json.dumps(analysis, separators=(",", ":"), sort_keys=True), analysis["ingested_at"]),
+            )
+            artifact_id = cur.lastrowid
+            file_cur = conn.execute(
+                "INSERT INTO files(case_id,target_id,artifact_id,object_sha256,original_filename,extension,ingested_at) VALUES(?,?,?,?,?,?,?)",
+                (case_id, target["id"], artifact_id, hashes["sha256"], filename, analysis["extension"], analysis["ingested_at"]),
+            )
+            file_id = file_cur.lastrowid
+        result = self.get_file(file_id)
+        if result is None:
+            raise RuntimeError("file record was not persisted")
+        return result
+
+    def get_file(self, file_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT f.id,f.case_id,f.target_id,f.artifact_id,f.original_filename,f.extension,f.ingested_at,o.sha256,o.storage_id,o.size,o.md5,o.sha1,o.detected_type,o.mime_type FROM files f JOIN file_objects o ON o.sha256=f.object_sha256 WHERE f.id=?",
+                (file_id,),
+            ).fetchone()
+        return self._row(row)
+
+    def get_file_analysis(self, file_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT a.* FROM files f JOIN artifacts a ON a.id=f.artifact_id WHERE f.id=?", (file_id,)).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["data"] = json.loads(item.pop("data_json"))
+        return item

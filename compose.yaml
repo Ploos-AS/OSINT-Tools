@@ -13,6 +13,7 @@ services:
       VIRUSTOTAL_API_KEY: "${VIRUSTOTAL_API_KEY:-}"
       ABUSEIPDB_API_KEY: "${ABUSEIPDB_API_KEY:-}"
       SHODAN_API_KEY: "${SHODAN_API_KEY:-}"
+      OSINT_TOOLS_MAX_UPLOAD_BYTES: "${OSINT_TOOLS_MAX_UPLOAD_BYTES:-26214400}"
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

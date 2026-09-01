@@ -36,16 +36,16 @@ def test_case_update_and_delete_cascades(tmp_path):
     assert store.get_target(target["id"]) is None
 
 
-def test_schema_one_migrates_without_data_loss(tmp_path):
+def test_schema_two_migrates_without_data_loss(tmp_path):
     path = tmp_path / "old.db"
     conn = sqlite3.connect(path)
     conn.executescript("""
         CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO schema_meta VALUES ('schema_version', '1');
+        INSERT INTO schema_meta VALUES ('schema_version', '2');
         CREATE TABLE cases (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         CREATE TABLE targets (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE, type TEXT NOT NULL, value TEXT NOT NULL, normalized TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(case_id,type,normalized));
         CREATE TABLE artifacts (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE, target_id INTEGER REFERENCES targets(id) ON DELETE SET NULL, type TEXT NOT NULL, source TEXT NOT NULL, data_json TEXT NOT NULL, created_at TEXT NOT NULL);
-        CREATE TABLE relationships (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE, source_target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE, relation TEXT NOT NULL, destination_target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE, created_at TEXT NOT NULL, UNIQUE(case_id,source_target_id,relation,destination_target_id));
+        CREATE TABLE relationships (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE, source_target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE, relation TEXT NOT NULL, destination_target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE, artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL, created_at TEXT NOT NULL, UNIQUE(case_id,source_target_id,relation,destination_target_id));
         CREATE TABLE notes (id INTEGER PRIMARY KEY AUTOINCREMENT, case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE, target_id INTEGER REFERENCES targets(id) ON DELETE CASCADE, artifact_id INTEGER REFERENCES artifacts(id) ON DELETE CASCADE, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
         INSERT INTO cases VALUES (1, 'preserved', '', 'open', 'now', 'now');
     """)
@@ -54,4 +54,6 @@ def test_schema_one_migrates_without_data_loss(tmp_path):
     assert store.get_case(1)["name"] == "preserved"
     with store.connect() as migrated:
         assert "artifact_id" in {row[1] for row in migrated.execute("PRAGMA table_info(relationships)")}
-        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "2"
+        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "3"
+        tables = {row[0] for row in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"file_objects", "files"} <= tables

@@ -1,4 +1,5 @@
 import json
+import io
 import os
 
 os.environ.setdefault("OSINT_TOOLS_DATA_DIR", "/tmp/osint-tools-test-import")
@@ -17,6 +18,14 @@ def handler(path, body=None):
         captured.update(status=status, payload=payload)
         return payload
     instance._json = respond
+    return instance, captured
+
+
+def upload_handler(path, content, filename="sample.bin", length=None):
+    instance, captured = handler(path)
+    instance.rfile = io.BytesIO(content)
+    headers = {"Content-Length": str(len(content) if length is None else length), "X-Filename": filename}
+    instance.headers = headers
     return instance, captured
 
 
@@ -72,3 +81,36 @@ def test_generic_enrichment_api_reports_unconfigured_as_skipped(tmp_path):
     assert response["status"] == 200
     assert response["payload"]["result"]["summary"] == {"success": 0, "skipped": 1, "failed": 0}
     assert response["payload"]["result"]["results"][0]["reason"]["code"] == "provider_not_configured"
+
+
+def test_file_upload_and_retrieval_api(tmp_path):
+    store = setup_api(tmp_path)
+    server.FILE_STORE = server.ContentStore(tmp_path / "files")
+    server.MAX_UPLOAD_BYTES = 10
+    case = store.create_case("Upload API")
+    request, response = upload_handler(f"/api/v1/cases/{case['id']}/files", b"hello", "../hello.txt")
+    request.do_POST()
+    assert response["status"] == 201
+    file_id = response["payload"]["result"]["id"]
+    request, response = handler(f"/api/v1/files/{file_id}")
+    request.do_GET()
+    assert response["payload"]["result"]["original_filename"] == "../hello.txt"
+    request, response = handler(f"/api/v1/files/{file_id}/analysis")
+    request.do_GET()
+    assert response["payload"]["result"]["data"]["detected_type"] == "text"
+
+
+def test_file_upload_api_errors_are_structured(tmp_path):
+    setup_api(tmp_path)
+    server.FILE_STORE = server.ContentStore(tmp_path / "files")
+    server.MAX_UPLOAD_BYTES = 2
+    request, response = upload_handler("/api/v1/cases/999/files", b"x")
+    request.do_POST()
+    assert response["status"] == 404 and response["payload"]["error"]["code"] == "case_not_found"
+    case = server.STORE.create_case("errors")
+    request, response = upload_handler(f"/api/v1/cases/{case['id']}/files", b"abc")
+    request.do_POST()
+    assert response["status"] == 413 and response["payload"]["error"]["code"] == "upload_too_large"
+    request, response = upload_handler(f"/api/v1/cases/{case['id']}/files", b"x", length=2)
+    request.do_POST()
+    assert response["status"] == 400 and response["payload"]["error"]["code"] == "incomplete_upload"

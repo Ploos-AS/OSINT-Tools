@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from . import __version__
 from .core import dns_lookup, http_inspect, ip_info, mail_domain, rdap_lookup, target_dict, detect_target, tls_inspect
+from .files import ContentStore, FileError, ingest_file
 from .pivots import pivot_dns
 from .provider_service import enrich_target, execute_provider
 from .providers import ProviderError, builtin_registry
@@ -17,10 +18,12 @@ PORT = int(os.environ.get("OSINT_TOOLS_PORT", "8080"))
 DATA_DIR = os.environ.get("OSINT_TOOLS_DATA_DIR", "/data")
 STORE = Store(os.path.join(DATA_DIR, "osint-tools.db"))
 PROVIDERS = builtin_registry()
+FILE_STORE = ContentStore(os.path.join(DATA_DIR, "files"))
+MAX_UPLOAD_BYTES = int(os.environ.get("OSINT_TOOLS_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.3.2"
+    server_version = "OSINT-Tools/0.4.1"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -54,7 +57,13 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M3.2", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite"})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M4.1", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES})
+            if len(parts) == 4 and parts[:3] == ["api", "v1", "files"]:
+                result = STORE.get_file(int(parts[3]))
+                return self._json(200, {"ok": True, "result": result}) if result else self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "files"] and parts[4] == "analysis":
+                result = STORE.get_file_analysis(int(parts[3]))
+                return self._json(200, {"ok": True, "result": result}) if result else self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
             if parsed.path == "/api/v1/providers":
                 return self._json(200, {"ok": True, "result": [provider.status() for provider in PROVIDERS.list()]})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "providers"]:
@@ -92,6 +101,18 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         _, parts = self._parts()
         try:
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "files":
+                if self.headers.get("Transfer-Encoding"):
+                    raise FileError("unsupported_transfer_encoding", "content length is required", 411)
+                raw_length = self.headers.get("Content-Length")
+                if raw_length is None:
+                    raise FileError("content_length_required", "content length is required", 411)
+                try:
+                    content_length = int(raw_length)
+                except ValueError:
+                    raise FileError("invalid_content_length", "content length must be an integer", 400) from None
+                result = ingest_file(STORE, FILE_STORE, int(parts[3]), self.rfile, content_length, self.headers.get("X-Filename", "unnamed"), MAX_UPLOAD_BYTES)
+                return self._json(201, {"ok": True, "result": result})
             body = self._body()
             if parts == ["api", "v1", "cases"]:
                 name = str(body.get("name", "")).strip()
@@ -121,6 +142,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"ok": False, "error": "not found"})
         except ProviderError as exc:
             return self._provider_error(exc)
+        except FileError as exc:
+            return self._json(exc.status, {"ok": False, "error": exc.payload()})
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             return self._json(400, {"ok": False, "error": str(exc)})
         except Exception:
@@ -155,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M3.2 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M4.1 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
