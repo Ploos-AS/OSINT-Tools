@@ -8,6 +8,11 @@ services:
       - "${OSINT_TOOLS_PORT_PUBLISHED:-8090}:8080"
     volumes:
       - osint-tools-data:/data
+    environment:
+      IPINFO_TOKEN: "${IPINFO_TOKEN:-}"
+      VIRUSTOTAL_API_KEY: "${VIRUSTOTAL_API_KEY:-}"
+      ABUSEIPDB_API_KEY: "${ABUSEIPDB_API_KEY:-}"
+      SHODAN_API_KEY: "${SHODAN_API_KEY:-}"
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true

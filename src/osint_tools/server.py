@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .core import dns_lookup, http_inspect, ip_info, mail_domain, rdap_lookup, target_dict, detect_target, tls_inspect
 from .pivots import pivot_dns
-from .provider_service import execute_provider
+from .provider_service import enrich_target, execute_provider
 from .providers import ProviderError, builtin_registry
 from .storage import Store
 
@@ -20,7 +20,7 @@ PROVIDERS = builtin_registry()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.3"
+    server_version = "OSINT-Tools/0.3.2"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -54,7 +54,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M3.1", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite"})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M3.2", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite"})
             if parsed.path == "/api/v1/providers":
                 return self._json(200, {"ok": True, "result": [provider.status() for provider in PROVIDERS.list()]})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "providers"]:
@@ -116,6 +116,8 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 7 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "providers":
                 result = execute_provider(STORE, PROVIDERS, int(parts[3]), parts[5], parts[6])
                 return self._json(201, {"ok": True, "result": result})
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "enrich":
+                return self._json(200, {"ok": True, "result": enrich_target(STORE, PROVIDERS, int(parts[3]))})
             return self._json(404, {"ok": False, "error": "not found"})
         except ProviderError as exc:
             return self._provider_error(exc)
@@ -153,7 +155,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M3.1 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M3.2 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

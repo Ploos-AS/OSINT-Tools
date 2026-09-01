@@ -29,6 +29,9 @@ def detect_target(value: str) -> Target:
         return Target("ip", raw, ip.compressed)
     except ValueError:
         pass
+    candidate_hash = raw.lower()
+    if len(candidate_hash) in (32, 40, 64) and all(char in "0123456789abcdef" for char in candidate_hash):
+        return Target("hash", raw, candidate_hash)
     parsed = urllib.parse.urlsplit(raw)
     if parsed.scheme in {"http", "https"} and parsed.hostname:
         normalized = urllib.parse.urlunsplit(

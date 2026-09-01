@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from .core import detect_target
 from .providers.base import ProviderError
 from .providers.registry import ProviderRegistry
 from .storage import Store
@@ -35,4 +36,39 @@ def execute_provider(store: Store, registry: ProviderRegistry, target_id: int, p
         "provider_metadata": result.metadata,
     }
     artifact = store.add_artifact(target["case_id"], target_id, f"provider:{provider.id}:{operation}", provider.id, {"result": result.data, "provenance": provenance})
-    return {"artifact": artifact}
+    targets = []
+    relationships = []
+    for pivot in result.pivots:
+        try:
+            derived = detect_target(pivot.value)
+        except ValueError:
+            continue
+        if derived.type not in ("ip", "domain", "url", "hash") or (derived.type == target["type"] and derived.normalized == target["normalized"]):
+            continue
+        child = store.add_target(target["case_id"], derived.type, pivot.value, derived.normalized)
+        relationship = store.add_relationship(target["case_id"], target_id, pivot.relation, child["id"], artifact["id"])
+        targets.append(child)
+        relationships.append(relationship)
+    return {"artifact": artifact, "targets": targets, "relationships": relationships}
+
+
+def enrich_target(store: Store, registry: ProviderRegistry, target_id: int) -> dict:
+    target = store.get_target(target_id)
+    if target is None:
+        raise ProviderError("target_not_found", "target not found", status=404)
+    results = []
+    for provider in registry.list():
+        if target["type"] not in provider.supported_target_types:
+            continue
+        if hasattr(provider, "enabled") and not provider.enabled():
+            results.append({"provider": provider.id, "status": "skipped", "reason": {"code": "provider_disabled", "message": "provider is disabled"}})
+            continue
+        if not provider.configured():
+            results.append({"provider": provider.id, "status": "skipped", "reason": {"code": "provider_not_configured", "message": "provider is not configured"}})
+            continue
+        try:
+            value = execute_provider(store, registry, target_id, provider.id, provider.default_operation)
+            results.append({"provider": provider.id, "operation": provider.default_operation, "status": "success", "result": value})
+        except ProviderError as exc:
+            results.append({"provider": provider.id, "operation": provider.default_operation, "status": "failed", "error": exc.payload()})
+    return {"target_id": target_id, "results": results, "summary": {state: sum(1 for item in results if item["status"] == state) for state in ("success", "skipped", "failed")}}

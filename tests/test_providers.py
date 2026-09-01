@@ -30,6 +30,7 @@ class FakeProvider:
     operations = ("lookup",)
     required_config = ("FAKE_TOKEN",)
     default_timeout = 1.0
+    default_operation = "lookup"
 
     def __init__(self, configured=True):
         self._configured = configured
@@ -95,7 +96,7 @@ def test_ipinfo_request_and_rate_limit_do_not_expose_token():
     [
         (TimeoutError(), "provider_timeout", 504),
         (URLError(socket.timeout()), "provider_timeout", 504),
-        (HTTPError("https://ipinfo.io", 429, "secret-in-upstream", {}, BytesIO()), "upstream_http_error", 502),
+        (HTTPError("https://ipinfo.io", 429, "secret-in-upstream", {}, BytesIO()), "rate_limit_exhausted", 429),
         (URLError("token=must-not-leak"), "provider_unavailable", 502),
     ],
 )

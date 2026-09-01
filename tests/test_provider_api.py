@@ -61,3 +61,14 @@ def test_provider_execution_api_validation_and_secret_redaction(tmp_path):
     request.do_POST()
     assert response["status"] == 404
     assert response["payload"]["error"]["code"] == "unknown_operation"
+
+
+def test_generic_enrichment_api_reports_unconfigured_as_skipped(tmp_path):
+    store = setup_api(tmp_path)
+    case = store.create_case("Enrich API")
+    target = store.add_target(case["id"], "ip", "1.1.1.1", "1.1.1.1")
+    request, response = handler(f"/api/v1/targets/{target['id']}/enrich")
+    request.do_POST()
+    assert response["status"] == 200
+    assert response["payload"]["result"]["summary"] == {"success": 0, "skipped": 1, "failed": 0}
+    assert response["payload"]["result"]["results"][0]["reason"]["code"] == "provider_not_configured"

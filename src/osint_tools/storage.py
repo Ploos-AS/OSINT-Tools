@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utcnow() -> str:
@@ -76,6 +76,7 @@ class Store:
                     source_target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
                     relation TEXT NOT NULL,
                     destination_target_id INTEGER NOT NULL REFERENCES targets(id) ON DELETE CASCADE,
+                    artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE(case_id, source_target_id, relation, destination_target_id)
                 );
@@ -91,6 +92,9 @@ class Store:
                 );
                 """
             )
+            relationship_columns = {row[1] for row in conn.execute("PRAGMA table_info(relationships)")}
+            if "artifact_id" not in relationship_columns:
+                conn.execute("ALTER TABLE relationships ADD COLUMN artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL")
             conn.execute(
                 "INSERT OR REPLACE INTO schema_meta(key, value) VALUES('schema_version', ?)",
                 (str(SCHEMA_VERSION),),
@@ -196,12 +200,14 @@ class Store:
         item["data"] = json.loads(item.pop("data_json"))
         return item
 
-    def add_relationship(self, case_id: int, source_target_id: int, relation: str, destination_target_id: int) -> dict[str, Any]:
+    def add_relationship(self, case_id: int, source_target_id: int, relation: str, destination_target_id: int, artifact_id: int | None = None) -> dict[str, Any]:
         with self.connect() as conn:
             conn.execute(
-                "INSERT OR IGNORE INTO relationships(case_id,source_target_id,relation,destination_target_id,created_at) VALUES(?,?,?,?,?)",
-                (case_id, source_target_id, relation, destination_target_id, utcnow()),
+                "INSERT OR IGNORE INTO relationships(case_id,source_target_id,relation,destination_target_id,artifact_id,created_at) VALUES(?,?,?,?,?,?)",
+                (case_id, source_target_id, relation, destination_target_id, artifact_id, utcnow()),
             )
+            if artifact_id is not None:
+                conn.execute("UPDATE relationships SET artifact_id=? WHERE case_id=? AND source_target_id=? AND relation=? AND destination_target_id=?", (artifact_id, case_id, source_target_id, relation, destination_target_id))
             row = conn.execute(
                 "SELECT * FROM relationships WHERE case_id=? AND source_target_id=? AND relation=? AND destination_target_id=?",
                 (case_id, source_target_id, relation, destination_target_id),
