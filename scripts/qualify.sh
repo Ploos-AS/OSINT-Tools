@@ -36,13 +36,25 @@ run_gate "hostile filename protection" python -m pytest -q tests/test_files.py -
 run_gate "oversize/partial cleanup" python -m pytest -q tests/test_files.py::test_oversize_and_incomplete_cleanup
 run_gate "content deduplication" python -m pytest -q tests/test_files.py::test_content_addressing_and_physical_deduplication
 run_gate "file persistence" python -m pytest -q tests/test_files.py::test_file_association_artifact_persistence_and_hash_pivot
+run_gate "M4.2 structured analysis" python -m pytest -q tests/test_structured_analysis.py
+run_gate "ZIP inventory/child analysis" python -m pytest -q tests/test_structured_analysis.py::test_zip_inventory_child_hash_dedup_and_provenance
+run_gate "TAR analysis" python -m pytest -q tests/test_structured_analysis.py::test_tar_regular_and_symlink_are_safe
+run_gate "gzip/nested archive" python -m pytest -q tests/test_structured_analysis.py::test_gzip_and_nested_archive
+run_gate "archive resource limits" python -m pytest -q tests/test_structured_analysis.py::test_archive_limits
+run_gate "archive traversal protection" python -m pytest -q tests/test_structured_analysis.py -k traversal
+run_gate "special/encrypted protection" python -m pytest -q tests/test_structured_analysis.py::test_tar_regular_and_symlink_are_safe tests/test_structured_analysis.py::test_malformed_and_encrypted_zip
+run_gate "image/EXIF metadata" python -m pytest -q tests/test_structured_analysis.py -k 'image or exif'
+run_gate "PDF metadata" python -m pytest -q tests/test_structured_analysis.py::test_pdf_metadata_and_active_indicator
+run_gate "office metadata" python -m pytest -q tests/test_structured_analysis.py -k 'office or odf'
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
 docker_ready=0
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     export OSINT_TOOLS_PORT_PUBLISHED=$docker_port
-    export OSINT_TOOLS_MAX_UPLOAD_BYTES=1024
+    export OSINT_TOOLS_MAX_UPLOAD_BYTES=16384
+    export OSINT_TOOLS_ARCHIVE_MAX_DEPTH=2 OSINT_TOOLS_ARCHIVE_MAX_MEMBERS=5
+    export OSINT_TOOLS_ARCHIVE_MAX_MEMBER_BYTES=1024 OSINT_TOOLS_ARCHIVE_MAX_TOTAL_BYTES=1200 OSINT_TOOLS_ARCHIVE_MAX_RATIO=10
     if docker compose -p "$docker_project" build; then
         record "Docker build" PASS ""
         if docker compose -p "$docker_project" up -d && \
@@ -70,7 +82,7 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.4.1" and i["milestone"] == "M4.1" and i["max_upload_bytes"] == 1024
+assert i["version"] == "0.4.2" and i["milestone"] == "M4.2" and i["max_upload_bytes"] == 16384
 PY
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
     case_json=$(curl -fsS -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases") || api_ok=0
@@ -139,7 +151,7 @@ PY
     curl -fsS "$base/api/v1/files/$text_file_id/analysis" >"$tmp_dir/analysis.json" || m4_ok=0
     object_count=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
     [ "$object_count" -eq 3 ] || m4_ok=0
-    dd if=/dev/zero of="$tmp_dir/oversized" bs=1025 count=1 >/dev/null 2>&1
+    dd if=/dev/zero of="$tmp_dir/oversized" bs=16385 count=1 >/dev/null 2>&1
     code=$(curl -sS -o "$tmp_dir/oversized.json" -w '%{http_code}' -X POST -H 'X-Filename: too-large.bin' --data-binary "@$tmp_dir/oversized" "$base/api/v1/cases/$case_id/files") || true
     [ "$code" = 413 ] || m4_ok=0
     object_count_after=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
@@ -147,10 +159,72 @@ PY
     [ "$object_count_after" -eq 3 ] && [ "$temporary_count" -eq 0 ] || m4_ok=0
     [ "$m4_ok" -eq 1 ] && record "M4.1 upload runtime" PASS "" || record "M4.1 upload runtime" FAIL "upload/hash/type/dedup/oversize checks failed"
 
+    python - "$tmp_dir" <<'PY'
+import gzip, io, sys, tarfile, zipfile
+from pathlib import Path
+from PIL import Image
+d = Path(sys.argv[1])
+def z(path, entries):
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as a:
+        for name, data in entries: a.writestr(name, data)
+z(d/"basic.zip", [("hello.txt", b"hello"), ("../../etc/passwd", b"hello")])
+inner = io.BytesIO(); z(inner, [("deep.txt", b"deep")])
+middle = io.BytesIO(); z(middle, [("inner.zip", inner.getvalue())])
+z(d/"nested.zip", [("middle.zip", middle.getvalue())])
+z(d/"bomb.zip", [("large.txt", b"A" * 1000)])
+z(d/"members.zip", [(str(i), b"x") for i in range(6)])
+z(d/"member-limit.zip", [("large.bin", bytes(range(256))*5)])
+z(d/"total-limit.zip", [("a.bin", bytes(range(200))*4), ("b.bin", bytes(range(200))*4)])
+with tarfile.open(d/"safe.tar", "w") as a:
+    x=tarfile.TarInfo("file.txt"); x.size=4; a.addfile(x, io.BytesIO(b"data"))
+    x=tarfile.TarInfo("link"); x.type=tarfile.SYMTYPE; x.linkname="/etc/passwd"; a.addfile(x)
+(d/"child.txt.gz").write_bytes(gzip.compress(b"gzip child", mtime=0))
+Image.new("RGB", (3,2), "red").save(d/"image.png", "PNG")
+ex=Image.Exif(); ex[271]="CameraCo"; Image.new("RGB", (3,2), "red").save(d/"image.jpg", "JPEG", exif=ex)
+(d/"meta.pdf").write_bytes(b"%PDF-1.7\n<</Type /Page /Title (Case) /JavaScript (x)>>\n%%EOF")
+z(d/"report.docx", [("word/document.xml",b"<x/>"),("docProps/core.xml",b'<x xmlns:d="d"><d:title>Report</d:title></x>')])
+(d/"bad.zip").write_bytes(b"PK\x03\x04bad")
+PY
+    structured_ok=1
+    for fixture in basic.zip nested.zip bomb.zip members.zip member-limit.zip total-limit.zip safe.tar child.txt.gz image.png image.jpg meta.pdf report.docx bad.zip; do
+        upload_file "$tmp_dir/$fixture" "$fixture" >"$tmp_dir/$fixture.json" || structured_ok=0
+    done
+    python - "$base" "$tmp_dir" <<'PY' || structured_ok=0
+import json, sys, urllib.request
+base, directory = sys.argv[1:]
+def analysis(name):
+    file_id=json.load(open(f"{directory}/{name}.json"))["result"]["id"]
+    return file_id, json.load(urllib.request.urlopen(f"{base}/api/v1/files/{file_id}/analysis"))["result"]
+def typed(result, kind): return next(x["data"] for x in result["structured"] if x["type"] == kind)
+basic_id,basic=analysis("basic.zip"); archive=typed(basic,"archive_analysis")
+assert len(archive["members"])==2 and archive["members"][1]["suspicious_path"]
+assert archive["members"][0]["child_sha256"]==archive["members"][1]["child_sha256"]
+_,tar=analysis("safe.tar"); assert typed(tar,"archive_analysis")["members"][1]["reason"]=="special_member"
+_,gz=analysis("child.txt.gz"); assert typed(gz,"archive_analysis")["members"][0]["actual_bytes"]==10
+_,nested=analysis("nested.zip"); middle_id=typed(nested,"archive_analysis")["members"][0]["child_file_id"]
+middle=json.load(urllib.request.urlopen(f"{base}/api/v1/files/{middle_id}/analysis"))["result"]
+inner_id=typed(middle,"archive_analysis")["members"][0]["child_file_id"]
+inner=json.load(urllib.request.urlopen(f"{base}/api/v1/files/{inner_id}/analysis"))["result"]
+assert typed(inner,"archive_analysis")["reason"]=="max_depth"
+_,bomb=analysis("bomb.zip"); assert typed(bomb,"archive_analysis")["members"][0]["reason"]=="max_compression_ratio"
+_,members=analysis("members.zip"); assert typed(members,"archive_analysis")["reason"]=="max_members"
+_,limit=analysis("member-limit.zip"); assert typed(limit,"archive_analysis")["members"][0]["reason"] in ("max_member_bytes","max_total_bytes")
+_,total=analysis("total-limit.zip"); assert typed(total,"archive_analysis")["members"][1]["reason"]=="max_total_bytes"
+_,png=analysis("image.png"); assert typed(png,"image_metadata")["width"]==3
+_,jpeg=analysis("image.jpg"); assert typed(jpeg,"image_metadata")["exif"]["make"]=="CameraCo"
+_,pdf=analysis("meta.pdf"); assert typed(pdf,"pdf_metadata")["metadata"]["title"]=="Case"
+_,doc=analysis("report.docx"); assert typed(doc,"document_metadata")["format"]=="docx"
+_,bad=analysis("bad.zip"); assert typed(bad,"archive_analysis")["reason"]=="malformed_archive"
+open(f"{directory}/structured-id", "w").write(str(basic_id))
+PY
+    [ "$structured_ok" -eq 1 ] && record "M4.2 structured runtime" PASS "" || record "M4.2 structured runtime" FAIL "structured fixture checks failed"
+    structured_file_id=$(cat "$tmp_dir/structured-id" 2>/dev/null || true)
+
     if docker compose -p "$docker_project" restart >/dev/null && \
        i=0; while [ "$i" -lt 30 ]; do curl -fsS "$base/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done; \
        curl -fsS "$base/api/v1/cases/$case_id" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["name"] == "qualification"' && \
-       curl -fsS "$base/api/v1/files/$text_file_id/analysis" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["type"] == "file_analysis"'; then
+       curl -fsS "$base/api/v1/files/$text_file_id/analysis" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["type"] == "file_analysis"' && \
+       curl -fsS "$base/api/v1/files/$structured_file_id/analysis" | python -c 'import json,sys; assert any(x["type"]=="archive_analysis" for x in json.load(sys.stdin)["result"]["structured"])'; then
         record "persistence" PASS ""
     else
         record "persistence" FAIL "case did not survive restart"
@@ -162,6 +236,7 @@ else
     record "M3.1 provider framework runtime" SKIPPED "Docker runtime was not available"
     record "M3.2 enrichment runtime" SKIPPED "Docker runtime was not available"
     record "M4.1 upload runtime" SKIPPED "Docker runtime was not available"
+    record "M4.2 structured runtime" SKIPPED "Docker runtime was not available"
     record "persistence" SKIPPED "Docker runtime was not available"
 fi
 [ -z "${OSINT_TOOLS_PORT_PUBLISHED+x}" ] || docker compose -p "$docker_project" down -v >/dev/null 2>&1 || true
@@ -179,7 +254,7 @@ if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
             podman_target=$(curl -fsS -H 'Content-Type: application/json' -d '{"value":"1.1.1.1"}' "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/targets" 2>/dev/null || true)
             podman_upload=$(printf 'podman fixture' | curl -fsS -X POST -H 'X-Filename: podman.txt' --data-binary @- "http://127.0.0.1:$host_port/api/v1/cases/$podman_case_id/files" 2>/dev/null || true)
             if podman exec "$podman_name" test -w /data; then record "Podman /data write" PASS ""; else record "Podman /data write" FAIL "/data is not writable"; fi
-            if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && [ -n "$podman_upload" ] && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
+            if [ "$uid" = 10001 ] && [ -n "$podman_target" ] && [ -n "$podman_upload" ] && podman exec "$podman_name" python -c 'import PIL' && curl -fsS "http://127.0.0.1:$host_port/api/v1/info" >/dev/null && curl -fsS "http://127.0.0.1:$host_port/api/v1/providers" >/dev/null; then
                 record "Podman runtime/non-root" PASS ""
             else
                 record "Podman runtime/non-root" FAIL "health/API/UID verification failed"

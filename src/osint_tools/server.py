@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import __version__
 from .core import dns_lookup, http_inspect, ip_info, mail_domain, rdap_lookup, target_dict, detect_target, tls_inspect
 from .files import ContentStore, FileError, ingest_file
+from .files.budget import AnalysisLimits
 from .pivots import pivot_dns
 from .provider_service import enrich_target, execute_provider
 from .providers import ProviderError, builtin_registry
@@ -20,10 +21,18 @@ STORE = Store(os.path.join(DATA_DIR, "osint-tools.db"))
 PROVIDERS = builtin_registry()
 FILE_STORE = ContentStore(os.path.join(DATA_DIR, "files"))
 MAX_UPLOAD_BYTES = int(os.environ.get("OSINT_TOOLS_MAX_UPLOAD_BYTES", str(25 * 1024 * 1024)))
+ANALYSIS_LIMITS = AnalysisLimits(
+    max_depth=int(os.environ.get("OSINT_TOOLS_ARCHIVE_MAX_DEPTH", "3")),
+    max_members=int(os.environ.get("OSINT_TOOLS_ARCHIVE_MAX_MEMBERS", "1000")),
+    max_member_bytes=int(os.environ.get("OSINT_TOOLS_ARCHIVE_MAX_MEMBER_BYTES", str(25 * 1024 * 1024))),
+    max_total_bytes=int(os.environ.get("OSINT_TOOLS_ARCHIVE_MAX_TOTAL_BYTES", str(100 * 1024 * 1024))),
+    max_ratio=float(os.environ.get("OSINT_TOOLS_ARCHIVE_MAX_RATIO", "100")),
+    max_image_pixels=int(os.environ.get("OSINT_TOOLS_IMAGE_MAX_PIXELS", "40000000")),
+)
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.4.1"
+    server_version = "OSINT-Tools/0.4.2"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -57,7 +66,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M4.1", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M4.2", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "files"]:
                 result = STORE.get_file(int(parts[3]))
                 return self._json(200, {"ok": True, "result": result}) if result else self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
@@ -111,7 +120,7 @@ class Handler(BaseHTTPRequestHandler):
                     content_length = int(raw_length)
                 except ValueError:
                     raise FileError("invalid_content_length", "content length must be an integer", 400) from None
-                result = ingest_file(STORE, FILE_STORE, int(parts[3]), self.rfile, content_length, self.headers.get("X-Filename", "unnamed"), MAX_UPLOAD_BYTES)
+                result = ingest_file(STORE, FILE_STORE, int(parts[3]), self.rfile, content_length, self.headers.get("X-Filename", "unnamed"), MAX_UPLOAD_BYTES, ANALYSIS_LIMITS)
                 return self._json(201, {"ok": True, "result": result})
             body = self._body()
             if parts == ["api", "v1", "cases"]:
@@ -178,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M4.1 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M4.2 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

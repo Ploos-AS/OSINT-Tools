@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def utcnow() -> str:
@@ -111,6 +111,12 @@ class Store:
                     original_filename TEXT NOT NULL,
                     extension TEXT NOT NULL,
                     ingested_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS file_structured_artifacts (
+                    file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+                    artifact_id INTEGER NOT NULL UNIQUE REFERENCES artifacts(id) ON DELETE CASCADE,
+                    PRIMARY KEY(file_id, artifact_id)
                 );
                 """
             )
@@ -290,4 +296,17 @@ class Store:
             return None
         item = dict(row)
         item["data"] = json.loads(item.pop("data_json"))
+        with self.connect() as conn:
+            rows = conn.execute("SELECT a.* FROM file_structured_artifacts fsa JOIN artifacts a ON a.id=fsa.artifact_id WHERE fsa.file_id=? ORDER BY a.id", (file_id,)).fetchall()
+        item["structured"] = []
+        for structured in rows:
+            value = dict(structured); value["data"] = json.loads(value.pop("data_json")); item["structured"].append(value)
         return item
+
+    def add_structured_artifact(self, file_id: int, artifact_type: str, data: dict[str, Any]) -> dict[str, Any]:
+        file = self.get_file(file_id)
+        if file is None: raise KeyError("file not found")
+        artifact = self.add_artifact(file["case_id"], file["target_id"], artifact_type, "local", data)
+        with self.connect() as conn:
+            conn.execute("INSERT INTO file_structured_artifacts(file_id,artifact_id) VALUES(?,?)", (file_id, artifact["id"]))
+        return artifact

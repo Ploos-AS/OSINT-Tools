@@ -37,7 +37,9 @@ def identify(sample: bytes, filename: str) -> dict:
             detected_type, mime_type, expected_extensions = kind, mime, extensions
             break
     else:
-        if not sample:
+        if len(sample) >= 262 and sample[257:262] == b"ustar":
+            detected_type, mime_type, expected_extensions = "tar", "application/x-tar", (".tar",)
+        elif not sample:
             detected_type, mime_type = "empty", "application/x-empty"
         else:
             try:

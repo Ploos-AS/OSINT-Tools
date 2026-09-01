@@ -54,6 +54,20 @@ def test_schema_two_migrates_without_data_loss(tmp_path):
     assert store.get_case(1)["name"] == "preserved"
     with store.connect() as migrated:
         assert "artifact_id" in {row[1] for row in migrated.execute("PRAGMA table_info(relationships)")}
-        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "3"
+        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "4"
         tables = {row[0] for row in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"file_objects", "files"} <= tables
+        assert {"file_objects", "files", "file_structured_artifacts"} <= tables
+
+
+def test_schema_three_adds_structured_artifact_association(tmp_path):
+    path = tmp_path / "schema3.db"
+    store = Store(path)
+    case = store.create_case("preserved schema 3")
+    with store.connect() as conn:
+        conn.execute("DROP TABLE file_structured_artifacts")
+        conn.execute("UPDATE schema_meta SET value='3' WHERE key='schema_version'")
+    migrated = Store(path)
+    assert migrated.get_case(case["id"])["name"] == "preserved schema 3"
+    with migrated.connect() as conn:
+        assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "4"
+        assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='file_structured_artifacts'").fetchone()

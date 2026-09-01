@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M4.1 Local Artifact Analysis** adds bounded, non-executing file ingestion, content-addressed storage, streaming hashes, baseline signature detection, and persistent file-analysis artifacts. Existing passive primitives, cases, pivots, and optional providers remain available without API keys.
+**M4.2 Safe Structured Content Analysis** adds bounded ZIP/TAR/gzip child analysis, PNG/JPEG/GIF and selected EXIF metadata, safe PDF metadata, and ZIP-based Office/ODF metadata. Existing ingestion, passive primitives, cases, pivots, and optional providers remain available without API keys.
 
 ## Run with Docker or Podman
 
@@ -31,8 +31,10 @@ Optional credentials are `IPINFO_TOKEN`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KE
 
 Uploaded bytes are stored under `/data/files` and are never executed, unpacked, rendered, or sent to providers. The default maximum is 25 MiB and can be changed with `OSINT_TOOLS_MAX_UPLOAD_BYTES`. Explicit enrichment of the resulting SHA-256 target may query VirusTotal by hash; it never uploads the file body.
 
+Archive members are never unpacked into filename-derived paths. Eligible children are streamed into the same content-addressed store under shared depth/member/expanded-byte/compression-ratio limits. Structured results are returned under the existing file-analysis API. See the M4.2 specification for limit environment variables and parser boundaries.
+
 Run the non-interactive qualification harness with `scripts/qualify.sh`. It reports each Docker, Podman, regression, persistence, and per-provider live gate as `PASS`, `FAIL`, or `SKIPPED`; live calls run only when the corresponding credential is present.
 
 The same OCI image is intended for Docker and Podman, amd64 and arm64, and runs as a non-root user. Persistent application data lives under `/data`.
 
-See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
+See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
