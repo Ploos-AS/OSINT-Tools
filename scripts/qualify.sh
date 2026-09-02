@@ -37,6 +37,22 @@ except Exception:
 PY
 }
 
+extract_id() {
+    python - "$1" "$2" <<'PY'
+import json, re, sys
+path, label = sys.argv[1:]
+try:
+    value = json.load(open(path)).get("result", {}).get("id")
+except Exception as exc:
+    print(f"{label} response is not valid JSON: {exc}", file=sys.stderr)
+    raise SystemExit(1)
+if not isinstance(value, int) or value <= 0:
+    print(f"{label} response did not return a valid id", file=sys.stderr)
+    raise SystemExit(1)
+print(value)
+PY
+}
+
 run_gate "Python tests" python -m pytest -v
 run_gate "git diff --check" git diff --check
 
@@ -80,6 +96,8 @@ run_gate "AV registry" python -m pytest -q tests/test_av.py
 run_gate "ClamAV protocol" python -m pytest -q tests/test_av.py -k 'ping or detected or normalized'
 run_gate "ClamAV unavailable/failure isolation" python -m pytest -q tests/test_av.py -k 'disabled or persistence'
 run_gate "scan-on-upload/archive policy" python -m pytest -q tests/test_av_policy.py
+run_gate "M5.1 UI unit tests" python -m pytest -q tests/test_ui.py
+run_gate "M5.1 XSS/evidence semantics" python -m pytest -q tests/test_ui.py -k 'escape or distinguish'
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
@@ -116,16 +134,60 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.4.5" and i["milestone"] == "M4.5" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.5.1" and i["milestone"] == "M5.1" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
-    case_json=$(curl -fsS -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases") || api_ok=0
-    case_id=$(printf '%s' "$case_json" | python -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])') || api_ok=0
-    target_json=$(curl -fsS -H 'Content-Type: application/json' -d '{"value":"example.com"}' "$base/api/v1/cases/$case_id/targets") || api_ok=0
-    target_id=$(printf '%s' "$target_json" | python -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])') || api_ok=0
-    curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$target_id/pivot/dns" >"$tmp_dir/pivot.json" || api_ok=0
+    case_code=$(curl -sS -o "$tmp_dir/case.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases" || true)
+    [ "$case_code" = 201 ] || api_ok=0
+    if case_id=$(extract_id "$tmp_dir/case.json" case); then :; else api_ok=0; case_id=0; fi
+    ui_ok=1
+    ui_code=$(curl -sS -o /dev/null -w '%{http_code}' "$base/") || ui_ok=0
+    [ "$ui_code" = 303 ] || ui_ok=0
+    curl -fsS "$base/cases" >"$tmp_dir/cases.html" || ui_ok=0
+    curl -fsS "$base/static/app.css" >"$tmp_dir/app.css" || ui_ok=0
+    curl -fsS "$base/static/app.js" >"$tmp_dir/app.js" || ui_ok=0
+    python - "$tmp_dir/cases.html" <<'PY' || ui_ok=0
+from pathlib import Path
+s = Path(__import__('sys').argv[1]).read_text()
+assert '<script>alert(1)</script>' not in s and 'Content-Security-Policy' not in s
+assert 'Cases' in s and '/static/app.css' in s
+PY
+    [ "$ui_ok" -eq 1 ] && record "M5.1 browser routes" PASS "" || record "M5.1 browser routes" FAIL "UI shell or static asset request failed"
+    traversal_code=$(curl --path-as-is -sS -o /dev/null -w '%{http_code}' "$base/static/../server.py" || true)
+    [ "$traversal_code" = 404 ] && record "M5.1 static traversal protection" PASS "" || record "M5.1 static traversal protection" FAIL "static path traversal was not rejected"
+    origin_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Origin: https://evil.invalid' -d 'name=blocked' "$base/ui/cases" || true)
+    [ "$origin_code" = 400 ] && record "M5.1 browser mutation protection" PASS "" || record "M5.1 browser mutation protection" FAIL "cross-origin UI mutation was accepted"
+    ui_case_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -d 'name=UI+qualification&description=browser+workflow' "$base/ui/cases") || ui_case_code=000
+    [ "$ui_case_code" = 303 ] && record "M5.1 case workflow" PASS "" || record "M5.1 case workflow" FAIL "browser case creation failed"
+    curl -fsS "$base/cases/$case_id" >"$tmp_dir/workspace.html" && grep -q 'Targets' "$tmp_dir/workspace.html" && record "M5.1 file evidence rendering" PASS "" || record "M5.1 file evidence rendering" FAIL "case workspace unavailable"
+    curl -fsS "$base/cases/$case_id" | grep -q '<h1>' && record "M5.1 no-JS browsing" PASS "server-rendered HTML" || record "M5.1 no-JS browsing" FAIL "HTML workspace unavailable"
+    ui_target_code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -d 'value=example.com' "$base/ui/cases/$case_id/targets" || true)
+    target_id=0
+    if [ "$ui_target_code" = 303 ]; then
+        curl -fsS "$base/api/v1/cases/$case_id" >"$tmp_dir/ui-target-case.json" || true
+        target_id=$(python - "$tmp_dir/ui-target-case.json" <<'PY'
+import json, sys
+items=json.load(open(sys.argv[1])).get("result", {}).get("targets", [])
+matches=[x["id"] for x in items if x.get("normalized") == "example.com" and isinstance(x.get("id"), int)]
+if not matches: raise SystemExit(1)
+print(matches[-1])
+PY
+        ) || target_id=0
+    fi
+    target_html_ok=1
+    target_page=$(curl -si "$base/cases/$case_id/targets/$target_id" 2>/dev/null || true)
+    printf '%s' "$target_page" | grep -qi 'Content-Type: text/html' || target_html_ok=0
+    printf '%s' "$target_page" | grep -q 'Provider status' || target_html_ok=0
+    printf '%s' "$target_page" | grep -q 'example.com' || target_html_ok=0
+    if [ "$target_id" -gt 0 ] && [ "$target_html_ok" -eq 1 ]; then record "M5.1 target workflow" PASS "browser mutation, HTML detail, and normalized value verified"; else record "M5.1 target workflow" FAIL "target creation did not return a valid target id or detail failed"; fi
+    upload_code=$(printf 'ui upload fixture' | curl -sS -o "$tmp_dir/ui-upload.json" -w '%{http_code}' -X POST -H 'X-Filename: ui.txt' --data-binary @- "$base/api/v1/cases/$case_id/files" || true)
+    [ "$upload_code" = 201 ] && record "M5.1 file upload workflow" PASS "" || record "M5.1 file upload workflow" FAIL "file upload failed"
+    [ "$ui_ok" -eq 1 ] && record "M5.1 API compatibility" PASS "" || record "M5.1 API compatibility" FAIL "UI checks failed"
+    # M2 uses the target created through the browser mutation above; no
+    # second target is needed and the ID has already been validated.
+    if [ "$target_id" -le 0 ]; then api_ok=0; else curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$target_id/pivot/dns" >"$tmp_dir/pivot.json" || api_ok=0; fi
     [ "$api_ok" -eq 1 ] && record "M2 regression" PASS "" || record "M2 regression" FAIL "representative case/target/DNS pivot failed"
 
     av_ok=1
@@ -148,8 +210,9 @@ e = json.load(open(sys.argv[2]))
 assert {item["id"] for item in p["result"]} == {"ipinfo", "virustotal", "abuseipdb", "shodan"}
 assert e["error"]["code"] == "unsupported_target_type"
 PY
-    ip_json=$(curl -fsS -H 'Content-Type: application/json' -d '{"value":"1.1.1.1"}' "$base/api/v1/cases/$case_id/targets") || provider_ok=0
-    ip_id=$(printf '%s' "$ip_json" | python -c 'import json,sys; print(json.load(sys.stdin)["result"]["id"])') || provider_ok=0
+    ip_code=$(curl -sS -o "$tmp_dir/ip.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"value":"1.1.1.1"}' "$base/api/v1/cases/$case_id/targets" || true)
+    [ "$ip_code" = 201 ] || provider_ok=0
+    if ip_id=$(extract_id "$tmp_dir/ip.json" ip); then :; else provider_ok=0; ip_id=0; fi
     code=$(curl -sS -o "$tmp_dir/unconfigured.json" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$ip_id/providers/ipinfo/lookup") || provider_ok=0
     [ "$code" = 409 ] || provider_ok=0
     python - "$tmp_dir/unconfigured.json" <<'PY' || provider_ok=0
@@ -171,6 +234,9 @@ PY
     [ "$enrich_ok" -eq 1 ] && record "M3.2 enrichment runtime" PASS "" || record "M3.2 enrichment runtime" FAIL "generic enrichment contract failed"
 
     m4_ok=1
+    m4_case_code=$(curl -sS -o "$tmp_dir/m4-case.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"name":"m4.1-upload-qualification"}' "$base/api/v1/cases" || true)
+    [ "$m4_case_code" = 201 ] || m4_ok=0
+    if m4_case_id=$(extract_id "$tmp_dir/m4-case.json" m4-case); then :; else m4_ok=0; m4_case_id=0; fi
     : >"$tmp_dir/empty"
     printf 'deterministic text fixture\n' >"$tmp_dir/text"
     printf '\211PNG\r\n\032\nfixture' >"$tmp_dir/image"
@@ -178,7 +244,7 @@ PY
     text_sha=$(sha256sum "$tmp_dir/text" | cut -d' ' -f1)
     text_md5=$(md5sum "$tmp_dir/text" | cut -d' ' -f1)
     text_sha1=$(sha1sum "$tmp_dir/text" | cut -d' ' -f1)
-    upload_file() { curl -fsS -X POST -H "X-Filename: $2" -H 'Content-Type: application/octet-stream' --data-binary "@$1" "$base/api/v1/cases/$case_id/files"; }
+    upload_file() { curl -fsS -X POST -H "X-Filename: $2" -H 'Content-Type: application/octet-stream' --data-binary "@$1" "$base/api/v1/cases/$m4_case_id/files"; }
     upload_file "$tmp_dir/empty" "empty.bin" >"$tmp_dir/empty.json" || m4_ok=0
     upload_file "$tmp_dir/text" "notes.txt" >"$tmp_dir/text.json" || m4_ok=0
     upload_file "$tmp_dir/image" "image.png" >"$tmp_dir/image.json" || m4_ok=0
@@ -198,7 +264,7 @@ PY
     object_count=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
     [ "$object_count" -eq 3 ] || m4_ok=0
     dd if=/dev/zero of="$tmp_dir/oversized" bs=16385 count=1 >/dev/null 2>&1
-    code=$(curl -sS -o "$tmp_dir/oversized.json" -w '%{http_code}' -X POST -H 'X-Filename: too-large.bin' --data-binary "@$tmp_dir/oversized" "$base/api/v1/cases/$case_id/files") || true
+    code=$(curl -sS -o "$tmp_dir/oversized.json" -w '%{http_code}' -X POST -H 'X-Filename: too-large.bin' --data-binary "@$tmp_dir/oversized" "$base/api/v1/cases/$m4_case_id/files") || true
     [ "$code" = 413 ] || m4_ok=0
     object_count_after=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
     temporary_count=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/.tmp -type f | wc -l') || m4_ok=0

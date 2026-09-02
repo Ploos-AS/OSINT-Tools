@@ -5,7 +5,7 @@ from osint_tools import __version__
 
 class SmokeTest(unittest.TestCase):
     def test_version(self):
-        self.assertEqual(__version__, "0.4.5")
+        self.assertEqual(__version__, "0.5.1")
 
     def test_data_dir_can_be_created(self):
         with tempfile.TemporaryDirectory() as d:

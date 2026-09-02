@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M4.5 Local Antivirus Engine Framework + ClamAV** adds an optional local antivirus registry, bounded ClamAV INSTREAM scanning, normalized antivirus evidence, versioned engine/database provenance, and explicit rescan APIs. Existing local rule/hash/similarity analysis remains available without ClamAV.
+**M5.1 Web UI Foundation & Case Workspace** adds a server-rendered, local-first analyst workspace over the existing APIs. M4.5 ClamAV and all prior local/provider analysis remain available.
 
 ## Run with Docker or Podman
 
@@ -45,4 +45,6 @@ Run the non-interactive qualification harness with `scripts/qualify.sh`. It repo
 
 The same OCI image is intended for Docker and Podman, amd64 and arm64, and runs as a non-root user. Persistent application data lives under `/data`.
 
-See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/M4_5_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
+Open `http://localhost:8080/` for the browser workspace. UI mutations are same-origin checked when a browser supplies an Origin header; authentication remains future work for local/private deployments.
+
+See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/M4_5_SPEC.md`, `docs/M5_1_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.

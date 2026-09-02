@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, unquote
 
 from . import __version__
 from .core import dns_lookup, http_inspect, ip_info, mail_domain, rdap_lookup, target_dict, detect_target, tls_inspect
@@ -20,6 +21,7 @@ from .pivots import pivot_dns
 from .provider_service import enrich_target, execute_provider
 from .providers import ProviderError, builtin_registry
 from .storage import Store
+from . import ui
 
 HOST = os.environ.get("OSINT_TOOLS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("OSINT_TOOLS_PORT", "8080"))
@@ -86,7 +88,7 @@ AV_REGISTRY = AVRegistry([ClamAVEngine(_env_bool("OSINT_TOOLS_CLAMAV_ENABLED", F
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.4.5"
+    server_version = "OSINT-Tools/0.5.1"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -98,6 +100,39 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _html(self, status: int, data: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers(); self.wfile.write(data)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(303); self.send_header("Location", location); self.send_header("Content-Length", "0"); self.end_headers()
+
+    def _browser_origin_ok(self) -> None:
+        origin = self.headers.get("Origin")
+        if not origin:
+            return
+        parsed = urlsplit(origin)
+        host = self.headers.get("Host", "")
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.netloc != host:
+            raise ValueError("cross-origin browser mutation rejected")
+
+    def _form(self) -> dict[str, str]:
+        length = int(self.headers.get("Content-Length", "0"))
+        if length > 64 * 1024:
+            raise ValueError("form body too large")
+        raw = self.rfile.read(length) if length else b""
+        from urllib.parse import parse_qs
+        return {key: values[0] for key, values in parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True).items()}
+
+    def _ui_error(self, status: int, message: str, case: dict | None = None):
+        return self._html(status, ui.page("Request error", f'<p class="error">{ui.esc(message)}</p><p><a href="/cases">Back to cases</a></p>', case))
 
     def _body(self, max_bytes: int = 1024 * 1024) -> dict:
         length = int(self.headers.get("Content-Length", "0"))
@@ -117,10 +152,36 @@ class Handler(BaseHTTPRequestHandler):
         parsed, parts = self._parts()
         q = parse_qs(parsed.query)
         try:
+            if parsed.path == "/":
+                return self._redirect("/cases")
+            if parsed.path in {"/static/app.css", "/static/app.js"}:
+                filename = parsed.path.rsplit("/", 1)[1]
+                try:
+                    data = open(os.path.join(os.path.dirname(__file__), "static", filename), "rb").read(256 * 1024)
+                except OSError:
+                    return self._json(404, {"ok": False, "error": "not found"})
+                content_type = "text/css; charset=utf-8" if filename.endswith(".css") else "text/javascript; charset=utf-8"
+                self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
+            if parsed.path.startswith("/static/"):
+                return self._json(404, {"ok": False, "error": "not found"})
+            if parsed.path == "/cases":
+                return self._html(200, ui.page("Cases", ui.cases(STORE.list_cases())))
+            if len(parts) == 2 and parts[0] == "cases":
+                case = STORE.get_case(int(parts[1]))
+                if case is None: return self._html(404, ui.page("Case not found", '<p class="error">Case not found.</p>'))
+                return self._html(200, ui.page(case["name"], ui.workspace(case, STORE.list_case_files(case["id"])), case))
+            if len(parts) == 4 and parts[0] == "cases" and parts[2] == "targets":
+                case = STORE.get_case(int(parts[1])); target = STORE.get_target(int(parts[3]))
+                if case is None or target is None or target["case_id"] != case["id"]: return self._html(404, ui.page("Target not found", '<p class="error">Target not found.</p>'))
+                return self._html(200, ui.page(f"Target {target['normalized']}", ui.target(case, target, STORE.list_target_artifacts(target["id"]), [p.status() for p in PROVIDERS.list()]), case))
+            if len(parts) == 2 and parts[0] == "files":
+                file = STORE.get_file(int(parts[1]))
+                if file is None: return self._html(404, ui.page("File not found", '<p class="error">File not found.</p>'))
+                return self._html(200, ui.page(file["original_filename"], ui.file_detail(file, STORE.get_file_analysis(file["id"]), STORE.list_file_detections(file["id"]), STORE.list_av_results(file["id"]), STORE.list_file_candidates(file["id"])), STORE.get_case(file["case_id"])))
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M4.5", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M5.1", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
             if parsed.path == "/api/v1/av/engines":
                 return self._json(200, {"ok": True, "result": [engine.status() for engine in AV_REGISTRY.list()[:AV_MAX_ENGINES]]})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "av"] and parts[3] == "engines":
@@ -188,13 +249,48 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "result": STORE.list_target_artifacts(int(parts[3]))})
             return self._json(404, {"ok": False, "error": "not found"})
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            if not parsed.path.startswith("/api/"):
+                return self._ui_error(400, str(exc))
             return self._json(400, {"ok": False, "error": str(exc)})
         except Exception:
+            if not parsed.path.startswith("/api/"):
+                return self._ui_error(500, "request failed")
             return self._json(502, {"ok": False, "error": {"code": "request_failed", "message": "request failed"}})
 
     def do_POST(self):
         _, parts = self._parts()
         try:
+            if parts and parts[0] == "ui":
+                self._browser_origin_ok()
+                if parts == ["ui", "cases"]:
+                    body = self._form(); name = body.get("name", "").strip()
+                    if not name: raise ValueError("name is required")
+                    case = STORE.create_case(name, body.get("description", ""))
+                    return self._redirect(f"/cases/{case['id']}")
+                if len(parts) == 4 and parts[:2] == ["ui", "cases"] and parts[3] == "targets":
+                    body = self._form(); case_id = int(parts[2]); detected = detect_target(body.get("value", ""))
+                    if STORE.get_case(case_id) is None: return self._ui_error(404, "Case not found")
+                    STORE.add_target(case_id, detected.type, detected.value, detected.normalized); return self._redirect(f"/cases/{case_id}")
+                if len(parts) == 4 and parts[:2] == ["ui", "cases"] and parts[3] == "files":
+                    case_id = int(parts[2]); length = int(self.headers.get("Content-Length", "0"))
+                    if self.headers.get("Transfer-Encoding") or length <= 0: raise ValueError("choose a file to upload")
+                    result = ingest_file(STORE, FILE_STORE, case_id, self.rfile, length, self.headers.get("X-Filename", "unnamed"), MAX_UPLOAD_BYTES, ANALYSIS_LIMITS, BINARY_LIMITS, DETECTION_LIMITS)
+                    return self._redirect(f"/files/{result['id']}")
+                if len(parts) == 4 and parts[:2] == ["ui", "targets"] and parts[3] in {"dns", "enrich"}:
+                    target_id = int(parts[2])
+                    if parts[3] == "dns": pivot_dns(STORE, target_id)
+                    else: enrich_target(STORE, PROVIDERS, target_id)
+                    target = STORE.get_target(target_id); return self._redirect(f"/cases/{target['case_id']}/targets/{target_id}") if target else self._ui_error(404, "Target not found")
+                if len(parts) == 5 and parts[:2] == ["ui", "files"] and parts[3] == "av" and parts[4] == "scan":
+                    result = scan_file(STORE, FILE_STORE, AV_REGISTRY, int(parts[2]), None, AV_TIMEOUT_SECONDS, AV_MAX_RESPONSE_BYTES)
+                    file = STORE.get_file(int(parts[2])); return self._redirect(f"/files/{file['id']}") if file else self._ui_error(404, "File not found")
+                if len(parts) == 5 and parts[:2] == ["ui", "files"] and parts[3:] == ["detections", "reanalyze"]:
+                    file_id = int(parts[2]); file = STORE.get_file(file_id)
+                    if file is None: return self._ui_error(404, "File not found")
+                    analyze_detections(STORE, FILE_STORE, file, DETECTION_LIMITS); return self._redirect(f"/files/{file_id}")
+                if len(parts) == 6 and parts[:2] == ["ui", "files"] and parts[3] == "candidates" and parts[5] == "promote":
+                    file_id = int(parts[2]); promote_candidate(STORE, file_id, int(parts[4])); return self._redirect(f"/files/{file_id}")
+                return self._ui_error(404, "UI action not found")
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "files":
                 if self.headers.get("Transfer-Encoding"):
                     raise FileError("unsupported_transfer_encoding", "content length is required", 411)
@@ -261,14 +357,18 @@ class Handler(BaseHTTPRequestHandler):
         except ProviderError as exc:
             return self._provider_error(exc)
         except FileError as exc:
+            if parts and parts[0] == "ui": return self._ui_error(exc.status, exc.message)
             return self._json(exc.status, {"ok": False, "error": exc.payload()})
         except AVError as exc:
+            if parts and parts[0] == "ui": return self._ui_error(exc.status, exc.message)
             return self._json(exc.status, {"ok": False, "error": exc.payload()})
         except (RuleError, HashSetError) as exc:
             return self._json(422, {"ok": False, "error": {"code": "invalid_signature_material", "message": str(exc)}})
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
+            if parts and parts[0] == "ui": return self._ui_error(400, str(exc))
             return self._json(400, {"ok": False, "error": str(exc)})
         except Exception:
+            if parts and parts[0] == "ui": return self._ui_error(500, "request failed")
             return self._json(502, {"ok": False, "error": {"code": "request_failed", "message": "request failed"}})
 
     def do_PATCH(self):
@@ -300,7 +400,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M4.5 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M5.1 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osint-tools"
-version = "0.4.5"
+version = "0.5.1"
 description = "Self-hosted passive-first OSINT workbench"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -24,3 +24,6 @@ osint-tools = "osint_tools.server:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+osint_tools = ["static/*.css", "static/*.js"]

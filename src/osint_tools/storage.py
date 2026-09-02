@@ -392,6 +392,16 @@ class Store:
             ).fetchone()
         return self._row(row)
 
+    def list_case_files(self, case_id: int) -> list[dict[str, Any]]:
+        """Return logical file associations for a case without exposing paths."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                "SELECT f.id,f.case_id,f.target_id,f.artifact_id,f.original_filename,f.extension,f.ingested_at,o.sha256,o.storage_id,o.size,o.md5,o.sha1,o.detected_type,o.mime_type "
+                "FROM files f JOIN file_objects o ON o.sha256=f.object_sha256 WHERE f.case_id=? ORDER BY f.id DESC",
+                (case_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def get_file_analysis(self, file_id: int) -> dict[str, Any] | None:
         with self.connect() as conn:
             row = conn.execute("SELECT a.* FROM files f JOIN artifacts a ON a.id=f.artifact_id WHERE f.id=?", (file_id,)).fetchone()
