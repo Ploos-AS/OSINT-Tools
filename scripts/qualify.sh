@@ -108,6 +108,7 @@ run_gate "M5.3 canonical export" python -m pytest -q tests/test_m53.py::test_exp
 run_gate "M5.3 bundle integrity" python -m pytest -q tests/test_m53.py::test_bundle_manifest_integrity_and_metadata_only
 run_gate "M5.3 import safety/round trip" python -m pytest -q tests/test_m53.py::test_import_remaps_and_rejects_tampering
 run_gate "M5.3 report semantics/XSS" python -m pytest -q tests/test_m53.py::test_report_escapes_and_preserves_evidence_semantics
+run_gate "M5.4 STIX export/import" python -m pytest -q tests/test_m54.py
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
@@ -144,7 +145,7 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.5.3" and i["milestone"] == "M5.3" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.5.4" and i["milestone"] == "M5.4" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
@@ -233,8 +234,10 @@ PY
     [ "$m53_ok" -eq 1 ] && record "M5.3 export/import/report runtime" PASS "JSON, bundle, report, and remapped import verified" || record "M5.3 export/import/report runtime" FAIL "export/import/report runtime failed"
     # M2 uses the target created through the browser mutation above; no
     # second target is needed and the ID has already been validated.
-    if [ "$target_id" -le 0 ]; then api_ok=0; else curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$target_id/pivot/dns" >"$tmp_dir/pivot.json" || api_ok=0; fi
-    [ "$api_ok" -eq 1 ] && record "M2 regression" PASS "" || record "M2 regression" FAIL "representative case/target/DNS pivot failed"
+    m2_ok=1
+    if [ "$target_id" -le 0 ]; then m2_ok=0; else curl -sS -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$target_id/pivot/dns" -o "$tmp_dir/pivot.json" -w '%{http_code}' >"$tmp_dir/pivot.status" || m2_ok=0; [ "$(cat "$tmp_dir/pivot.status")" = 200 ] || m2_ok=0; fi
+    if [ "$m2_ok" -ne 1 ] && [ -f "$tmp_dir/pivot.json" ]; then dump_http_response "M2 DNS pivot" "$tmp_dir/pivot.json"; fi
+    [ "$m2_ok" -eq 1 ] && record "M2 regression" PASS "" || record "M2 regression" FAIL "representative case/target/DNS pivot failed"
 
     av_ok=1
     curl -fsS "$base/api/v1/av/engines" >"$tmp_dir/av-engines.json" || av_ok=0

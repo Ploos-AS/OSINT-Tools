@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M5.3 Case Export, Import & Reporting** adds integrity-verifiable case bundles, safe import, deterministic JSON export, and print-friendly reports. M5.2 workflows, M4.5 ClamAV, and all prior local/provider analysis remain available.
+**M5.4 Structured Intelligence Interoperability** adds conservative STIX 2.1 export/import alongside the lossless M5.3 case format. M5.3 reporting, M5.2 workflows, M4.5 ClamAV, and all prior local/provider analysis remain available.
 
 ## Run with Docker or Podman
 

@@ -2,7 +2,7 @@ import unittest
 from osint_tools import __version__
 from osint_tools.core import detect_target, ip_info
 class CoreTest(unittest.TestCase):
-    def test_version(self): self.assertEqual(__version__,'0.5.3')
+    def test_version(self): self.assertEqual(__version__,'0.5.4')
 
     def test_hash_targets(self):
         for length in (32, 40, 64):

@@ -23,6 +23,7 @@ from .providers import ProviderError, builtin_registry
 from .storage import Store
 from . import ui
 from .export import export_json, export_bundle, import_bundle, canonical_case, report_html
+from .stix import export_stix, import_stix
 
 HOST = os.environ.get("OSINT_TOOLS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("OSINT_TOOLS_PORT", "8080"))
@@ -89,7 +90,7 @@ AV_REGISTRY = AVRegistry([ClamAVEngine(_env_bool("OSINT_TOOLS_CLAMAV_ENABLED", F
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.5.3"
+    server_version = "OSINT-Tools/0.5.4"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -189,6 +190,10 @@ class Handler(BaseHTTPRequestHandler):
                 raw = export_json(STORE, int(parts[3]), q.get("redaction", ["none"])[0])
                 if raw is None: return self._json(404, {"ok": False, "error": "case not found"})
                 return self._bytes(200, raw, "application/json; charset=utf-8", f"case-{int(parts[3])}.json")
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "stix":
+                doc = export_stix(STORE, int(parts[3]))
+                if doc is None: return self._json(404, {"ok": False, "error": "case not found"})
+                return self._bytes(200, json.dumps(doc, sort_keys=True, separators=(",", ":")).encode(), "application/stix+json", f"case-{int(parts[3])}.stix.json")
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "bundle":
                 raw = export_bundle(STORE, FILE_STORE, int(parts[3]), q.get("redaction", ["none"])[0], q.get("bodies", ["full"])[0] != "metadata-only")
                 if raw is None: return self._json(404, {"ok": False, "error": "case not found"})
@@ -342,6 +347,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("invalid bundle size")
                 raw = self.rfile.read(length)
                 return self._json(201, {"ok": True, "result": import_bundle(STORE, FILE_STORE, raw)})
+            if parts == ["api", "v1", "cases", "import", "stix"]:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 16 * 1024 * 1024: raise ValueError("invalid STIX bundle size")
+                return self._json(201, {"ok": True, "result": import_stix(STORE, self.rfile.read(length))})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "files":
                 if self.headers.get("Transfer-Encoding"):
                     raise FileError("unsupported_transfer_encoding", "content length is required", 411)
@@ -451,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M5.3 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M5.4 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
