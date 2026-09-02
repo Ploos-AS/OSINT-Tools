@@ -20,7 +20,7 @@ def page(title: str, body: str, case: dict | None = None) -> bytes:
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · OSINT Tools</title><link rel="stylesheet" href="/static/app.css"></head>
-<body><header class="topbar"><a class="brand" href="/cases">OSINT Tools <span>0.5.2</span></a>
+<body><header class="topbar"><a class="brand" href="/cases">OSINT Tools <span>0.5.3</span></a>
 <nav aria-label="Primary"><a href="/cases">Cases</a>{case_link}</nav></header>
 <main class="shell"><h1>{esc(title)}</h1>{body}</main>
 <script src="/static/app.js" defer></script></body></html>"""
@@ -39,7 +39,7 @@ def workspace(case: dict, files: list[dict]) -> str:
     relationships = "".join(f'<li>{esc(r["source_target_id"])} — {esc(r["relation"])} → {esc(r["destination_target_id"])}</li>' for r in case["relationships"])
     file_rows = "".join(f'<li><a href="/files/{f["id"]}">{esc(f["original_filename"])}</a> · {esc(f["detected_type"])} · {esc(f["size"])} bytes · <code>{esc(f["sha256"])}</code></li>' for f in files)
     notes = "".join(f'<li>{esc(n["body"])}</li>' for n in case["notes"])
-    return f'''<p class="muted">{esc(case.get("description"))}</p><p>Status: <strong>{esc(case.get("status"))}</strong></p><p class="tabs"><a href="/cases/{case["id"]}/graph">Graph</a> · <a href="/cases/{case["id"]}/timeline">Timeline</a></p>
+    return f'''<p class="muted">{esc(case.get("description"))}</p><p>Status: <strong>{esc(case.get("status"))}</strong></p><p class="tabs"><a href="/cases/{case["id"]}/graph">Graph</a> · <a href="/cases/{case["id"]}/timeline">Timeline</a> · <a href="/cases/{case["id"]}/report">Report</a> · <a href="/api/v1/cases/{case["id"]}/export">Export JSON</a> · <a href="/api/v1/cases/{case["id"]}/bundle">Export bundle</a></p>
 <div class="grid"><section class="card"><h2>Targets</h2>{"<ul class=items>"+targets+"</ul>" if targets else "<p class=empty>No targets.</p>"}<form method="post" action="/ui/cases/{case["id"]}/targets"><label>Add target <input name="value" required maxlength="2048"></label><button type="submit">Add target</button></form></section>
 <section class="card"><h2>Files</h2>{"<ul class=items>"+file_rows+"</ul>" if file_rows else "<p class=empty>No files.</p>"}<form class="file-upload" method="post" action="/ui/cases/{case["id"]}/files" enctype="multipart/form-data"><label>Upload file <input type="file" name="file" required></label><button type="submit">Upload</button></form></section>
 <section class="card"><h2>Relationships</h2>{"<ul class=items>"+relationships+"</ul>" if relationships else "<p class=empty>No relationships.</p>"}</section>

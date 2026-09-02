@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M5.2 Interactive Analysis Workspace** adds bounded server-rendered graph and timeline views over persisted case evidence. M5.1 workflows, M4.5 ClamAV, and all prior local/provider analysis remain available.
+**M5.3 Case Export, Import & Reporting** adds integrity-verifiable case bundles, safe import, deterministic JSON export, and print-friendly reports. M5.2 workflows, M4.5 ClamAV, and all prior local/provider analysis remain available.
 
 ## Run with Docker or Podman
 

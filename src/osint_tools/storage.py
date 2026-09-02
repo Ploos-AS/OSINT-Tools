@@ -340,6 +340,15 @@ class Store:
             out.append(item)
         return out
 
+    def get_artifact(self, artifact_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+        if row is None:
+            return None
+        item = dict(row)
+        item["data"] = json.loads(item.pop("data_json"))
+        return item
+
     def add_artifact(self, case_id: int, target_id: int | None, artifact_type: str, source: str, data: Any) -> dict[str, Any]:
         with self.connect() as conn:
             cur = conn.execute(

@@ -103,6 +103,11 @@ run_gate "M5.2 timeline unit tests" python -m pytest -q tests/test_m52.py -k tim
 run_gate "M5.2 graph bounds/filtering" python -m pytest -q tests/test_m52.py::test_graph_filters_and_bounds_are_deterministic
 run_gate "M5.2 timeline bounds/ordering" python -m pytest -q tests/test_m52.py::test_timeline_limit_is_bounded tests/test_m52.py::test_graph_and_timeline_are_bounded_deterministic_and_provenanced
 run_gate "M5.2 graph/timeline XSS safety" python -m pytest -q tests/test_m52.py::test_graph_and_timeline_render_hostile_values_as_text
+run_gate "M5.3 export/import/report unit tests" python -m pytest -q tests/test_m53.py
+run_gate "M5.3 canonical export" python -m pytest -q tests/test_m53.py::test_export_is_deterministic_and_redactable
+run_gate "M5.3 bundle integrity" python -m pytest -q tests/test_m53.py::test_bundle_manifest_integrity_and_metadata_only
+run_gate "M5.3 import safety/round trip" python -m pytest -q tests/test_m53.py::test_import_remaps_and_rejects_tampering
+run_gate "M5.3 report semantics/XSS" python -m pytest -q tests/test_m53.py::test_report_escapes_and_preserves_evidence_semantics
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
@@ -139,7 +144,7 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.5.2" and i["milestone"] == "M5.2" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.5.3" and i["milestone"] == "M5.3" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
@@ -212,6 +217,20 @@ PY
     curl -fsS "$base/api/v1/cases/$case_id/graph" >/dev/null && curl -fsS "$base/api/v1/cases/$case_id/timeline" >/dev/null || true
     after_targets=$(curl -fsS "$base/api/v1/cases/$case_id" | python -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["targets"]))') || after_targets=-1
     [ "$before_targets" = "$after_targets" ] && record "M5.2 GET non-mutation" PASS "graph/timeline reads preserved target count" || record "M5.2 GET non-mutation" FAIL "read-only graph/timeline changed state"
+    m53_ok=1
+    curl -fsS "$base/api/v1/cases/$case_id/export" >"$tmp_dir/case-export.json" || m53_ok=0
+    curl -fsS "$base/api/v1/cases/$case_id/bundle" >"$tmp_dir/case.osintcase" || m53_ok=0
+    curl -fsS "$base/cases/$case_id/report" >"$tmp_dir/report.html" || m53_ok=0
+    import_code=$(curl -sS -o "$tmp_dir/import.json" -w '%{http_code}' -X POST -H 'Content-Type: application/zip' --data-binary @"$tmp_dir/case.osintcase" "$base/api/v1/cases/import" || true)
+    [ "$import_code" = 201 ] || m53_ok=0
+    python - "$tmp_dir/case-export.json" "$tmp_dir/import.json" "$tmp_dir/report.html" <<'PY' || m53_ok=0
+import json,sys
+payload=json.load(open(sys.argv[1])); imported=json.load(open(sys.argv[2])); report=open(sys.argv[3]).read()
+assert payload["format"] == "osint-tools-case" and payload["format_version"] == 1
+assert imported["result"]["case_id"] != payload["case"].get("id")
+assert "No universal risk verdict" in report
+PY
+    [ "$m53_ok" -eq 1 ] && record "M5.3 export/import/report runtime" PASS "JSON, bundle, report, and remapped import verified" || record "M5.3 export/import/report runtime" FAIL "export/import/report runtime failed"
     # M2 uses the target created through the browser mutation above; no
     # second target is needed and the ID has already been validated.
     if [ "$target_id" -le 0 ]; then api_ok=0; else curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$target_id/pivot/dns" >"$tmp_dir/pivot.json" || api_ok=0; fi

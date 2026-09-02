@@ -22,6 +22,7 @@ from .provider_service import enrich_target, execute_provider
 from .providers import ProviderError, builtin_registry
 from .storage import Store
 from . import ui
+from .export import export_json, export_bundle, import_bundle, canonical_case, report_html
 
 HOST = os.environ.get("OSINT_TOOLS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("OSINT_TOOLS_PORT", "8080"))
@@ -88,7 +89,7 @@ AV_REGISTRY = AVRegistry([ClamAVEngine(_env_bool("OSINT_TOOLS_CLAMAV_ENABLED", F
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.5.2"
+    server_version = "OSINT-Tools/0.5.3"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -100,6 +101,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def _bytes(self, status: int, data: bytes, content_type: str, filename: str | None = None) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        if filename:
+            self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.end_headers(); self.wfile.write(data)
 
     def _html(self, status: int, data: bytes) -> None:
         self.send_response(status)
@@ -166,6 +176,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(404, {"ok": False, "error": "not found"})
             if parsed.path == "/cases":
                 return self._html(200, ui.page("Cases", ui.cases(STORE.list_cases())))
+            if len(parts) == 3 and parts[0] == "cases" and parts[2] == "report":
+                payload = canonical_case(STORE, int(parts[1]))
+                if payload is None:
+                    return self._html(404, ui.page("Case not found", '<p class="error">Case not found.</p>'))
+                return self._html(200, report_html(payload))
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "report.html":
+                payload = canonical_case(STORE, int(parts[3]))
+                if payload is None: return self._json(404, {"ok": False, "error": "case not found"})
+                return self._bytes(200, report_html(payload), "text/html; charset=utf-8", f"case-{int(parts[3])}-report.html")
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "export":
+                raw = export_json(STORE, int(parts[3]), q.get("redaction", ["none"])[0])
+                if raw is None: return self._json(404, {"ok": False, "error": "case not found"})
+                return self._bytes(200, raw, "application/json; charset=utf-8", f"case-{int(parts[3])}.json")
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "bundle":
+                raw = export_bundle(STORE, FILE_STORE, int(parts[3]), q.get("redaction", ["none"])[0], q.get("bodies", ["full"])[0] != "metadata-only")
+                if raw is None: return self._json(404, {"ok": False, "error": "case not found"})
+                return self._bytes(200, raw, "application/zip", f"case-{int(parts[3])}.osintcase")
             if len(parts) == 2 and parts[0] == "cases":
                 case = STORE.get_case(int(parts[1]))
                 if case is None: return self._html(404, ui.page("Case not found", '<p class="error">Case not found.</p>'))
@@ -191,7 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M5.2", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M5.3", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
             if parsed.path == "/api/v1/av/engines":
                 return self._json(200, {"ok": True, "result": [engine.status() for engine in AV_REGISTRY.list()[:AV_MAX_ENGINES]]})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "graph":
@@ -309,6 +336,12 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) == 6 and parts[:2] == ["ui", "files"] and parts[3] == "candidates" and parts[5] == "promote":
                     file_id = int(parts[2]); promote_candidate(STORE, file_id, int(parts[4])); return self._redirect(f"/files/{file_id}")
                 return self._ui_error(404, "UI action not found")
+            if parts == ["api", "v1", "cases", "import"]:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 64 * 1024 * 1024:
+                    raise ValueError("invalid bundle size")
+                raw = self.rfile.read(length)
+                return self._json(201, {"ok": True, "result": import_bundle(STORE, FILE_STORE, raw)})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "files":
                 if self.headers.get("Transfer-Encoding"):
                     raise FileError("unsupported_transfer_encoding", "content length is required", 411)
@@ -418,7 +451,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M5.2 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M5.3 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
