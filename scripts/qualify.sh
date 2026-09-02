@@ -98,6 +98,11 @@ run_gate "ClamAV unavailable/failure isolation" python -m pytest -q tests/test_a
 run_gate "scan-on-upload/archive policy" python -m pytest -q tests/test_av_policy.py
 run_gate "M5.1 UI unit tests" python -m pytest -q tests/test_ui.py
 run_gate "M5.1 XSS/evidence semantics" python -m pytest -q tests/test_ui.py -k 'escape or distinguish'
+run_gate "M5.2 graph unit tests" python -m pytest -q tests/test_m52.py -k graph
+run_gate "M5.2 timeline unit tests" python -m pytest -q tests/test_m52.py -k timeline
+run_gate "M5.2 graph bounds/filtering" python -m pytest -q tests/test_m52.py::test_graph_filters_and_bounds_are_deterministic
+run_gate "M5.2 timeline bounds/ordering" python -m pytest -q tests/test_m52.py::test_timeline_limit_is_bounded tests/test_m52.py::test_graph_and_timeline_are_bounded_deterministic_and_provenanced
+run_gate "M5.2 graph/timeline XSS safety" python -m pytest -q tests/test_m52.py::test_graph_and_timeline_render_hostile_values_as_text
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
@@ -134,7 +139,7 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.5.1" and i["milestone"] == "M5.1" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.5.2" and i["milestone"] == "M5.2" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
@@ -185,6 +190,28 @@ PY
     upload_code=$(printf 'ui upload fixture' | curl -sS -o "$tmp_dir/ui-upload.json" -w '%{http_code}' -X POST -H 'X-Filename: ui.txt' --data-binary @- "$base/api/v1/cases/$case_id/files" || true)
     [ "$upload_code" = 201 ] && record "M5.1 file upload workflow" PASS "" || record "M5.1 file upload workflow" FAIL "file upload failed"
     [ "$ui_ok" -eq 1 ] && record "M5.1 API compatibility" PASS "" || record "M5.1 API compatibility" FAIL "UI checks failed"
+    m52_ok=1
+    curl -fsS "$base/api/v1/cases/$case_id/graph" >"$tmp_dir/graph.json" || m52_ok=0
+    curl -fsS "$base/api/v1/cases/$case_id/timeline" >"$tmp_dir/timeline.json" || m52_ok=0
+    curl -fsS "$base/cases/$case_id/graph" >"$tmp_dir/graph.html" || m52_ok=0
+    curl -fsS "$base/cases/$case_id/timeline" >"$tmp_dir/timeline.html" || m52_ok=0
+    python - "$tmp_dir/graph.json" "$tmp_dir/timeline.json" "$tmp_dir/graph.html" "$tmp_dir/timeline.html" <<'PY' || m52_ok=0
+import json, sys
+g=json.load(open(sys.argv[1]))["result"]; t=json.load(open(sys.argv[2]))["result"]
+assert "nodes" in g and "edges" in g and isinstance(t,list)
+assert "Relationship graph" in open(sys.argv[3]).read() and "Timeline" in open(sys.argv[4]).read()
+PY
+    [ "$m52_ok" -eq 1 ] && record "M5.2 graph API" PASS "" || record "M5.2 graph API" FAIL "graph API failed"
+    [ "$m52_ok" -eq 1 ] && record "M5.2 graph UI" PASS "" || record "M5.2 graph UI" FAIL "graph HTML failed"
+    [ "$m52_ok" -eq 1 ] && record "M5.2 timeline API" PASS "" || record "M5.2 timeline API" FAIL "timeline API failed"
+    [ "$m52_ok" -eq 1 ] && record "M5.2 timeline UI" PASS "" || record "M5.2 timeline UI" FAIL "timeline HTML failed"
+    [ "$m52_ok" -eq 1 ] && record "M5.2 no-JS relationship fallback" PASS "" || record "M5.2 no-JS relationship fallback" FAIL "relationship fallback unavailable"
+    csp_headers=$(curl -sS -D - -o /dev/null "$base/cases/$case_id/graph" || true)
+    printf '%s' "$csp_headers" | grep -q "Content-Security-Policy:" && ! printf '%s' "$csp_headers" | grep -qi "unsafe-inline\|unsafe-eval" && record "M5.2 CSP compatibility" PASS "restrictive CSP served" || record "M5.2 CSP compatibility" FAIL "restrictive CSP missing or weakened"
+    before_targets=$(curl -fsS "$base/api/v1/cases/$case_id" | python -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["targets"]))') || before_targets=0
+    curl -fsS "$base/api/v1/cases/$case_id/graph" >/dev/null && curl -fsS "$base/api/v1/cases/$case_id/timeline" >/dev/null || true
+    after_targets=$(curl -fsS "$base/api/v1/cases/$case_id" | python -c 'import json,sys; print(len(json.load(sys.stdin)["result"]["targets"]))') || after_targets=-1
+    [ "$before_targets" = "$after_targets" ] && record "M5.2 GET non-mutation" PASS "graph/timeline reads preserved target count" || record "M5.2 GET non-mutation" FAIL "read-only graph/timeline changed state"
     # M2 uses the target created through the browser mutation above; no
     # second target is needed and the ID has already been validated.
     if [ "$target_id" -le 0 ]; then api_ok=0; else curl -fsS -X POST -H 'Content-Type: application/json' -d '{}' "$base/api/v1/targets/$target_id/pivot/dns" >"$tmp_dir/pivot.json" || api_ok=0; fi
@@ -237,6 +264,7 @@ PY
     m4_case_code=$(curl -sS -o "$tmp_dir/m4-case.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"name":"m4.1-upload-qualification"}' "$base/api/v1/cases" || true)
     [ "$m4_case_code" = 201 ] || m4_ok=0
     if m4_case_id=$(extract_id "$tmp_dir/m4-case.json" m4-case); then :; else m4_ok=0; m4_case_id=0; fi
+    object_count_before=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
     : >"$tmp_dir/empty"
     printf 'deterministic text fixture\n' >"$tmp_dir/text"
     printf '\211PNG\r\n\032\nfixture' >"$tmp_dir/image"
@@ -262,13 +290,18 @@ PY
     text_file_id=$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["id"])' "$tmp_dir/text.json") || m4_ok=0
     curl -fsS "$base/api/v1/files/$text_file_id/analysis" >"$tmp_dir/analysis.json" || m4_ok=0
     object_count=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
-    [ "$object_count" -eq 3 ] || m4_ok=0
+    [ "$object_count" -eq "$((object_count_before + 3))" ] || m4_ok=0
     dd if=/dev/zero of="$tmp_dir/oversized" bs=16385 count=1 >/dev/null 2>&1
     code=$(curl -sS -o "$tmp_dir/oversized.json" -w '%{http_code}' -X POST -H 'X-Filename: too-large.bin' --data-binary "@$tmp_dir/oversized" "$base/api/v1/cases/$m4_case_id/files") || true
     [ "$code" = 413 ] || m4_ok=0
     object_count_after=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/sha256 -type f | wc -l') || m4_ok=0
     temporary_count=$(docker compose -p "$docker_project" exec -T osint-tools sh -c 'find /data/files/.tmp -type f | wc -l') || m4_ok=0
-    [ "$object_count_after" -eq 3 ] && [ "$temporary_count" -eq 0 ] || m4_ok=0
+    [ "$object_count_after" -eq "$((object_count_before + 3))" ] && [ "$temporary_count" -eq 0 ] || m4_ok=0
+    if [ "$m4_ok" -ne 1 ]; then
+        printf 'M4.1 diagnostics: upload codes empty=%s text=%s image=%s duplicate=%s hostile=%s oversize=%s objects=%s objects_after=%s temp=%s\n' \
+            "$(test -s "$tmp_dir/empty.json" && echo 201 || echo missing)" "$(test -s "$tmp_dir/text.json" && echo 201 || echo missing)" "$(test -s "$tmp_dir/image.json" && echo 201 || echo missing)" "$(test -s "$tmp_dir/duplicate.json" && echo 201 || echo missing)" "$(test -s "$tmp_dir/hostile.json" && echo 201 || echo missing)" "$code" "$object_count" "$object_count_after" "$temporary_count" >&2
+        for f in empty text image duplicate hostile oversized; do [ -f "$tmp_dir/$f.json" ] && dump_http_response "M4.1 $f" "$tmp_dir/$f.json"; done
+    fi
     [ "$m4_ok" -eq 1 ] && record "M4.1 upload runtime" PASS "" || record "M4.1 upload runtime" FAIL "upload/hash/type/dedup/oversize checks failed"
 
     python - "$tmp_dir" <<'PY'

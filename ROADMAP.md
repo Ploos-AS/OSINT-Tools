@@ -12,5 +12,6 @@
 - **M4.4 Signatures, Rules & Similarity — complete:** managed versioned YARA-compatible rules and known-hash sets, normalized local evidence, SimHash fingerprints, local comparison and explicit reanalysis.
 - **M4.5 Local Antivirus Engine Framework + ClamAV — complete:** explicit local AV registry, optional ClamAV INSTREAM adapter, normalized states/evidence, engine/database provenance and bounded local scan policy.
 - **M5.1 Web UI Foundation & Case Workspace — complete:** server-rendered case, target, file and evidence workspaces with local static assets and safe browser mutations.
+- **M5.2 Interactive Analysis Workspace — complete:** bounded relationship graph, provenance-aware timeline, target-centric navigation, and accessible no-JavaScript fallbacks.
 - **M4 File/Image Intelligence:** later safe parsers may add archives, EXIF and perceptual hashes without executing content.
 - **M5 Release & Polish:** richer web UI, exports, documentation, packaging, security review and release qualification.

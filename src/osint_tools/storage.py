@@ -266,6 +266,26 @@ class Store:
         result["notes"] = [dict(r) for r in notes]
         return result
 
+    def case_graph(self, case_id: int, max_nodes: int = 250, max_edges: int = 500, target_type: str | None = None, relation: str | None = None) -> dict[str, Any] | None:
+        case = self.get_case(case_id)
+        if case is None: return None
+        targets = sorted((t for t in case["targets"] if not target_type or t["type"] == target_type), key=lambda x: x["id"])
+        target_ids = {t["id"] for t in targets}
+        relationships = sorted((r for r in case["relationships"] if (not relation or r["relation"] == relation) and r["source_target_id"] in target_ids and r["destination_target_id"] in target_ids), key=lambda x: x["id"])
+        nodes = [{"id": t["id"], "kind": "target", "type": t["type"], "value": t["normalized"], "url": f"/cases/{case_id}/targets/{t['id']}"} for t in targets[:max_nodes]]
+        allowed = {n["id"] for n in nodes}
+        edges = [{"id": r["id"], "source": r["source_target_id"], "target": r["destination_target_id"], "relation": r["relation"], "artifact_id": r.get("artifact_id")} for r in relationships if r["source_target_id"] in allowed and r["destination_target_id"] in allowed][:max_edges]
+        return {"case_id": case_id, "nodes": nodes, "edges": edges, "available_nodes": len(targets), "available_edges": len(relationships), "truncated": len(nodes) < len(targets) or len(edges) < len(relationships), "filters": {"target_type": target_type, "relation": relation}}
+
+    def case_timeline(self, case_id: int, limit: int = 500) -> list[dict[str, Any]] | None:
+        case = self.get_case(case_id)
+        if case is None: return None
+        events = [{"timestamp": case["created_at"], "event_type": "case_created", "entity_type": "case", "entity_id": case_id, "label": "Case created", "source": "local", "url": f"/cases/{case_id}"}]
+        events += [{"timestamp": t["created_at"], "event_type": "target_added", "entity_type": "target", "entity_id": t["id"], "label": f"Target added: {t['type']} {t['normalized']}", "source": "local", "url": f"/cases/{case_id}/targets/{t['id']}"} for t in case["targets"]]
+        events += [{"timestamp": a["created_at"], "event_type": "artifact_recorded", "entity_type": "artifact", "entity_id": a["id"], "label": f"Artifact recorded: {a['type']}", "source": a["source"], "url": f"/cases/{case_id}#artifact-{a['id']}"} for a in case["artifacts"]]
+        events += [{"timestamp": n["created_at"], "event_type": "note_added", "entity_type": "note", "entity_id": n["id"], "label": "Note added", "source": "local", "url": f"/cases/{case_id}#note-{n['id']}"} for n in case["notes"]]
+        return sorted(events, key=lambda x: (x["timestamp"], x["entity_type"], x["entity_id"]), reverse=True)[:limit]
+
     def update_case(self, case_id: int, *, name: str | None = None, description: str | None = None, status: str | None = None) -> dict[str, Any] | None:
         fields: list[str] = []
         values: list[Any] = []

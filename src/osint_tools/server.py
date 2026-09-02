@@ -88,7 +88,7 @@ AV_REGISTRY = AVRegistry([ClamAVEngine(_env_bool("OSINT_TOOLS_CLAMAV_ENABLED", F
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.5.1"
+    server_version = "OSINT-Tools/0.5.2"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -178,12 +178,30 @@ class Handler(BaseHTTPRequestHandler):
                 file = STORE.get_file(int(parts[1]))
                 if file is None: return self._html(404, ui.page("File not found", '<p class="error">File not found.</p>'))
                 return self._html(200, ui.page(file["original_filename"], ui.file_detail(file, STORE.get_file_analysis(file["id"]), STORE.list_file_detections(file["id"]), STORE.list_av_results(file["id"]), STORE.list_file_candidates(file["id"])), STORE.get_case(file["case_id"])))
+            if len(parts) == 3 and parts[0] == "cases" and parts[2] in {"graph", "timeline"}:
+                case = STORE.get_case(int(parts[1]))
+                if case is None: return self._html(404, ui.page("Case not found", '<p class="error">Case not found.</p>'))
+                if parts[2] == "graph":
+                    target_type = q.get("type", [None])[0] or None
+                    relation = q.get("relation", [None])[0] or None
+                    if target_type and len(target_type) > 64: target_type = None
+                    if relation and len(relation) > 128: relation = None
+                    return self._html(200, ui.page("Case graph", ui.graph(case, STORE.case_graph(case["id"], target_type=target_type, relation=relation)), case))
+                return self._html(200, ui.page("Case timeline", ui.timeline(case, STORE.case_timeline(case["id"]) or []), case))
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M5.1", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M5.2", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
             if parsed.path == "/api/v1/av/engines":
                 return self._json(200, {"ok": True, "result": [engine.status() for engine in AV_REGISTRY.list()[:AV_MAX_ENGINES]]})
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "graph":
+                target_type = q.get("type", [None])[0] or None
+                relation = q.get("relation", [None])[0] or None
+                if target_type and len(target_type) > 64: target_type = None
+                if relation and len(relation) > 128: relation = None
+                result = STORE.case_graph(int(parts[3]), target_type=target_type, relation=relation); return self._json(200, {"ok": True, "result": result}) if result else self._json(404, {"ok": False, "error": "case not found"})
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "timeline":
+                result = STORE.case_timeline(int(parts[3])); return self._json(200, {"ok": True, "result": result}) if result is not None else self._json(404, {"ok": False, "error": "case not found"})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "av"] and parts[3] == "engines":
                 engine=AV_REGISTRY.get(parts[4]); return self._json(200,{"ok":True,"result":engine.status()}) if engine else self._json(404,{"ok":False,"error":{"code":"unknown_engine","message":"antivirus engine not found"}})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "files"]:
@@ -400,7 +418,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M5.1 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M5.2 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
