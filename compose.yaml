@@ -9,6 +9,12 @@ services:
     volumes:
       - osint-tools-data:/data
     environment:
+      OSINT_TAXII_ENABLED: "${OSINT_TAXII_ENABLED:-false}"
+      OSINT_TAXII_URL: "${OSINT_TAXII_URL:-}"
+      OSINT_TAXII_TOKEN: "${OSINT_TAXII_TOKEN:-}"
+      OSINT_MISP_ENABLED: "${OSINT_MISP_ENABLED:-false}"
+      OSINT_MISP_URL: "${OSINT_MISP_URL:-}"
+      OSINT_MISP_API_KEY: "${OSINT_MISP_API_KEY:-}"
       IPINFO_TOKEN: "${IPINFO_TOKEN:-}"
       VIRUSTOTAL_API_KEY: "${VIRUSTOTAL_API_KEY:-}"
       ABUSEIPDB_API_KEY: "${ABUSEIPDB_API_KEY:-}"
@@ -47,6 +53,8 @@ services:
     restart: unless-stopped
     security_opt:
       - no-new-privileges:true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
   clamav:
     image: clamav/clamav:1.4.3

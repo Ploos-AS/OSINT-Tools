@@ -20,7 +20,7 @@ def page(title: str, body: str, case: dict | None = None) -> bytes:
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · OSINT Tools</title><link rel="stylesheet" href="/static/app.css"></head>
-<body><header class="topbar"><a class="brand" href="/cases">OSINT Tools <span>0.5.4</span></a>
+<body><header class="topbar"><a class="brand" href="/cases">OSINT Tools <span>0.5.5</span></a>
 <nav aria-label="Primary"><a href="/cases">Cases</a>{case_link}</nav></header>
 <main class="shell"><h1>{esc(title)}</h1>{body}</main>
 <script src="/static/app.js" defer></script></body></html>"""

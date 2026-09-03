@@ -20,7 +20,7 @@ def export_stix(store, case_id: int) -> dict | None:
     for t in sorted(case["targets"], key=lambda x:x["id"]):
         typ={"domain":"domain-name","ip":"ipv4-addr" if "." in t["normalized"] else "ipv6-addr","url":"url"}.get(t["type"])
         if not typ: continue
-        val=t["normalized"]; o=_obj(typ, f"{case_id}:{t['type']}:{val}"); o[typ.replace("-addr", "-addr").replace("domain-name","domain-name").replace("url","url")]=val
+        val=t["normalized"]; o=_obj(typ, f"{case_id}:{t['type']}:{val}"); o["value"] = val
         objects.append(o); target_ids[t["id"]]=o["id"]; refs.append(o["id"])
     for f in store.list_case_files(case_id):
         o=_obj("file", f"{case_id}:file:{f['sha256']}", hashes={"MD5":f["md5"],"SHA-1":f["sha1"],"SHA-256":f["sha256"]}, size=f["size"])
@@ -37,7 +37,7 @@ def export_stix(store, case_id: int) -> dict | None:
         objects.append(o)
     return {"type":"bundle","id":f"bundle--{uuid.uuid4()}","objects":objects,"x_osint_tools_object_counts":{k:sum(x["type"]==k for x in objects) for k in sorted({x["type"] for x in objects})}}
 
-def import_stix(store, raw: bytes) -> dict:
+def import_stix(store, raw: bytes, provenance: dict | None = None) -> dict:
     if len(raw)>16*1024*1024: raise ValueError("STIX bundle exceeds maximum size")
     try: doc=json.loads(raw)
     except json.JSONDecodeError: raise ValueError("invalid STIX JSON") from None
@@ -54,7 +54,7 @@ def import_stix(store, raw: bytes) -> dict:
     for o in objs:
         typ=o.get("type");
         if typ not in {"domain-name","ipv4-addr","ipv6-addr","url"}: continue
-        val=o.get(typ)
+        val=o.get("value")
         try:
             from .core import detect_target
             d=detect_target(str(val)); t=store.add_target(case["id"],d.type,d.value,d.normalized); mapping[o["id"]]=t["id"]; counts[typ]=counts.get(typ,0)+1
@@ -65,4 +65,4 @@ def import_stix(store, raw: bytes) -> dict:
         elif o.get("type")=="note":
             store.add_note(case["id"],str(o.get("content",""))[:12000]); counts["note"]=counts.get("note",0)+1
     unsupported=sorted({o.get("type") for o in objs if o.get("type") not in SUPPORTED})
-    return {"case_id":case["id"],"source_bundle_id":doc.get("id"),"imported_counts":counts,"unsupported_types":unsupported,"skipped_count":len(skipped)}
+    return {"case_id":case["id"],"source_bundle_id":doc.get("id"),"imported_counts":counts,"unsupported_types":unsupported,"skipped_count":len(skipped),"provenance":provenance or {"source_format":"STIX"}}

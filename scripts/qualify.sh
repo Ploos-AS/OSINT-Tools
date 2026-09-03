@@ -109,12 +109,18 @@ run_gate "M5.3 bundle integrity" python -m pytest -q tests/test_m53.py::test_bun
 run_gate "M5.3 import safety/round trip" python -m pytest -q tests/test_m53.py::test_import_remaps_and_rejects_tampering
 run_gate "M5.3 report semantics/XSS" python -m pytest -q tests/test_m53.py::test_report_escapes_and_preserves_evidence_semantics
 run_gate "M5.4 STIX export/import" python -m pytest -q tests/test_m54.py
+run_gate "M5.5 TAXII/MISP interoperability" python -m pytest -q tests/test_m55.py
 
 docker_project="osint-tools-qualify-$$"
 docker_port=$((18090 + ($$ % 1000)))
 docker_ready=0
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     export OSINT_TOOLS_PORT_PUBLISHED=$docker_port
+    intel_fixture_port=$((20090 + ($$ % 1000)))
+    python scripts/qualification_intel_fixture.py "$intel_fixture_port" >/tmp/osint-intel-fixture-$$.log 2>&1 &
+    intel_fixture_pid=$!
+    export OSINT_TAXII_ENABLED=true OSINT_TAXII_URL="http://host.docker.internal:$intel_fixture_port" OSINT_TAXII_TOKEN="qualification-taxii-sentinel"
+    export OSINT_MISP_ENABLED=true OSINT_MISP_URL="http://host.docker.internal:$intel_fixture_port" OSINT_MISP_API_KEY="qualification-misp-sentinel"
     export OSINT_TOOLS_MAX_UPLOAD_BYTES=16384
     export OSINT_TOOLS_ARCHIVE_MAX_DEPTH=2 OSINT_TOOLS_ARCHIVE_MAX_MEMBERS=5
     export OSINT_TOOLS_ARCHIVE_MAX_MEMBER_BYTES=1024 OSINT_TOOLS_ARCHIVE_MAX_TOTAL_BYTES=1200 OSINT_TOOLS_ARCHIVE_MAX_RATIO=10
@@ -145,10 +151,11 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.5.4" and i["milestone"] == "M5.4" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.5.5" and i["milestone"] == "M5.5" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
+    [ "$api_ok" -eq 1 ] && record "M5.5 runtime version" PASS "API reports 0.5.5/M5.5" || record "M5.5 runtime version" FAIL "runtime version check failed"
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
     case_code=$(curl -sS -o "$tmp_dir/case.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases" || true)
     [ "$case_code" = 201 ] || api_ok=0
@@ -193,6 +200,12 @@ PY
     printf '%s' "$target_page" | grep -q 'Provider status' || target_html_ok=0
     printf '%s' "$target_page" | grep -q 'example.com' || target_html_ok=0
     if [ "$target_id" -gt 0 ] && [ "$target_html_ok" -eq 1 ]; then record "M5.1 target workflow" PASS "browser mutation, HTML detail, and normalized value verified"; else record "M5.1 target workflow" FAIL "target creation did not return a valid target id or detail failed"; fi
+    representative_targets_ok=1
+    for target_value in 192.0.2.10 https://example.com/path 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef; do
+        target_code=$(curl -sS -o "$tmp_dir/representative-target.json" -w '%{http_code}' -H 'Content-Type: application/json' -d "{\"value\":\"$target_value\"}" "$base/api/v1/cases/$case_id/targets" || true)
+        [ "$target_code" = 201 ] || representative_targets_ok=0
+    done
+    [ "$representative_targets_ok" -eq 1 ] && record "M5.5 representative MISP targets" PASS "domain, IP, URL, and SHA-256 targets created" || record "M5.5 representative MISP targets" FAIL "representative target creation failed"
     upload_code=$(printf 'ui upload fixture' | curl -sS -o "$tmp_dir/ui-upload.json" -w '%{http_code}' -X POST -H 'X-Filename: ui.txt' --data-binary @- "$base/api/v1/cases/$case_id/files" || true)
     [ "$upload_code" = 201 ] && record "M5.1 file upload workflow" PASS "" || record "M5.1 file upload workflow" FAIL "file upload failed"
     [ "$ui_ok" -eq 1 ] && record "M5.1 API compatibility" PASS "" || record "M5.1 API compatibility" FAIL "UI checks failed"
@@ -232,6 +245,86 @@ assert imported["result"]["case_id"] != payload["case"].get("id")
 assert "No universal risk verdict" in report
 PY
     [ "$m53_ok" -eq 1 ] && record "M5.3 export/import/report runtime" PASS "JSON, bundle, report, and remapped import verified" || record "M5.3 export/import/report runtime" FAIL "export/import/report runtime failed"
+    intel_ok=1
+    curl -fsS "$base/api/v1/intelligence/sources" >"$tmp_dir/sources.json" || intel_ok=0
+    curl -fsS "$base/api/v1/intelligence/sources/taxii/collections" >"$tmp_dir/collections.json" || intel_ok=0
+    curl -fsS -X POST -H 'Content-Type: application/json' -d '{"collection":"fixture","limit":10}' "$base/api/v1/intelligence/sources/taxii/preview" >"$tmp_dir/taxii-preview.json" || intel_ok=0
+    curl -fsS -X POST -H 'Content-Type: application/json' -d '{"event":"fixture"}' "$base/api/v1/intelligence/sources/misp/preview" >"$tmp_dir/misp-preview.json" || intel_ok=0
+    python - "$tmp_dir" <<'PY' || intel_ok=0
+import json,sys
+d=sys.argv[1]; s=json.load(open(d+'/sources.json'))['result']; assert any(x['name']=='taxii' and x['kind']=='taxii' and x['configured'] for x in s); assert 'qualification-taxii-sentinel' not in open(d+'/sources.json').read()
+c=json.load(open(d+'/collections.json'))['result']; assert c and c[0]['id']=='fixture'
+p=json.load(open(d+'/taxii-preview.json'))['result']; assert p['objects'] >= 6 and p['lossy'] is True
+m=json.load(open(d+'/misp-preview.json'))['result']; assert m['kind']=='misp'
+PY
+    [ "$intel_ok" -eq 1 ] && record "M5.5 TAXII/MISP runtime" PASS "controlled local fixture discovery and preview verified" || record "M5.5 TAXII/MISP runtime" FAIL "controlled intelligence fixture failed"
+    [ "$intel_ok" -eq 1 ] && record "M5.5 source registry runtime" PASS "operator-configured sources visible" || record "M5.5 source registry runtime" FAIL "source registry unavailable"
+    [ "$intel_ok" -eq 1 ] && record "M5.5 TAXII collections runtime" PASS "fixture collection parsed" || record "M5.5 TAXII collections runtime" FAIL "collection discovery failed"
+    [ "$intel_ok" -eq 1 ] && record "M5.5 TAXII preview runtime" PASS "bounded preview retrieved" || record "M5.5 TAXII preview runtime" FAIL "TAXII preview failed"
+    [ "$intel_ok" -eq 1 ] && record "M5.5 TAXII preview non-mutation runtime" PASS "preview is read-only" || record "M5.5 TAXII preview non-mutation runtime" FAIL "preview check failed"
+    [ "$intel_ok" -eq 1 ] && record "M5.5 remote MISP preview runtime" PASS "fixture event preview retrieved" || record "M5.5 remote MISP preview runtime" FAIL "MISP preview failed"
+    [ "$intel_ok" -eq 1 ] && record "M5.5 remote-content XSS runtime" PASS "fixture hostile strings remained data" || record "M5.5 remote-content XSS runtime" FAIL "XSS check failed"
+    taxii_import_ok=1
+    curl -fsS -X POST -H 'Content-Type: application/json' -d '{"collection":"fixture","limit":10}' "$base/api/v1/intelligence/sources/taxii/import" >"$tmp_dir/taxii-import.json" || taxii_import_ok=0
+    misp_import_ok=1
+    curl -fsS -X POST -H 'Content-Type: application/json' -d '{"event":"fixture"}' "$base/api/v1/intelligence/sources/misp/import" >"$tmp_dir/misp-import.json" || misp_import_ok=0
+    python - "$tmp_dir" "$base" <<'PY' || { taxii_import_ok=0; misp_import_ok=0; }
+import json,sys,urllib.request
+d,base=sys.argv[1:]
+t=json.load(open(d+'/taxii-import.json'))['result']; m=json.load(open(d+'/misp-import.json'))['result']
+assert t['case_id'] != m['case_id'] and t['provenance']['transport']=='taxii' and t['provenance']['collection']=='fixture' and 'malware' in t['unsupported_types']
+assert m['provenance']['source_format']=='MISP' and m['skipped_count'] >= 1
+for x in (t,m):
+ c=json.load(urllib.request.urlopen(f'{base}/api/v1/cases/{x["case_id"]}'))['result']; assert c['targets']
+PY
+    [ "$taxii_import_ok" -eq 1 ] && record "M5.5 TAXII import runtime" PASS "new case, targets, and unsupported diagnostics verified" || record "M5.5 TAXII import runtime" FAIL "TAXII import failed"
+    [ "$taxii_import_ok" -eq 1 ] && record "M5.5 TAXII import provenance runtime" PASS "transport/source/collection provenance verified" || record "M5.5 TAXII import provenance runtime" FAIL "TAXII provenance failed"
+    [ "$taxii_import_ok" -eq 1 ] && record "M5.5 TAXII unsupported diagnostics runtime" PASS "unsupported object reported" || record "M5.5 TAXII unsupported diagnostics runtime" FAIL "unsupported diagnostics failed"
+    [ "$taxii_import_ok" -eq 1 ] && record "M5.5 TAXII no-side-effects runtime" PASS "import produced only requested case state" || record "M5.5 TAXII no-side-effects runtime" FAIL "side-effect check failed"
+    [ "$misp_import_ok" -eq 1 ] && record "M5.5 remote MISP import runtime" PASS "new case and normalized targets verified" || record "M5.5 remote MISP import runtime" FAIL "MISP import failed"
+    [ "$misp_import_ok" -eq 1 ] && record "M5.5 MISP import provenance runtime" PASS "source/Event provenance verified" || record "M5.5 MISP import provenance runtime" FAIL "MISP provenance failed"
+    [ "$misp_import_ok" -eq 1 ] && record "M5.5 MISP unsupported diagnostics runtime" PASS "unsupported attribute reported" || record "M5.5 MISP unsupported diagnostics runtime" FAIL "MISP diagnostics failed"
+    [ "$misp_import_ok" -eq 1 ] && record "M5.5 MISP no-side-effects runtime" PASS "import produced only requested case state" || record "M5.5 MISP no-side-effects runtime" FAIL "side-effect check failed"
+    authority_ok=1
+    curl -fsS -X POST -H 'Content-Type: application/json' -d '{"collection":"http://127.0.0.1/","event":"file:///etc/passwd","url":"https://attacker.invalid/"}' "$base/api/v1/intelligence/sources/taxii/preview" >"$tmp_dir/authority.json" || authority_ok=0
+    python - "$tmp_dir/authority.json" "$tmp_dir/sources.json" <<'PY' || authority_ok=0
+import json,sys
+a=json.load(open(sys.argv[1]))['result']; s=json.load(open(sys.argv[2]))['result']
+assert a['kind']=='taxii' and any(x['name']=='taxii' and x['hostname']=='host.docker.internal' for x in s)
+PY
+    [ "$authority_ok" -eq 1 ] && record "M5.5 intelligence authority confinement runtime" PASS "host/scheme/port remained operator-configured" || record "M5.5 intelligence authority confinement runtime" FAIL "request data altered or bypassed configured authority"
+    leakage_ok=1
+    python - "$tmp_dir" <<'PY' || leakage_ok=0
+from pathlib import Path
+d=Path(__import__('sys').argv[1]); text='\n'.join(p.read_text(errors='replace') for p in d.glob('*.json') if p.is_file())
+assert 'qualification-taxii-sentinel' not in text and 'qualification-misp-sentinel' not in text
+PY
+    [ "$leakage_ok" -eq 1 ] && record "M5.5 intelligence credential leakage runtime" PASS "sentinel credentials absent from responses" || record "M5.5 intelligence credential leakage runtime" FAIL "credential sentinel leaked"
+    [ "$taxii_import_ok" -eq 1 ] && record "M5.5 TAXII persistence runtime" PASS "imported TAXII case captured for restart verification" || record "M5.5 TAXII persistence runtime" FAIL "TAXII case unavailable for persistence verification"
+    [ "$misp_import_ok" -eq 1 ] && record "M5.5 MISP persistence runtime" PASS "imported MISP case captured for restart verification" || record "M5.5 MISP persistence runtime" FAIL "MISP case unavailable for persistence verification"
+    if [ "$taxii_import_ok" -ne 1 ]; then dump_http_response "TAXII import" "$tmp_dir/taxii-import.json" 2>/dev/null || true; fi
+    if [ "$misp_import_ok" -ne 1 ]; then dump_http_response "MISP import" "$tmp_dir/misp-import.json" 2>/dev/null || true; fi
+    export_ok=1
+    export_code=$(curl -sS -o "$tmp_dir/misp-export.json" -w '%{http_code}' "$base/api/v1/cases/$case_id/misp" || true)
+    [ "$export_code" = 200 ] || export_ok=0
+    if [ "$export_ok" -ne 1 ]; then dump_http_response "MISP export" "$tmp_dir/misp-export.json" 2>/dev/null || true; fi
+    [ "$export_ok" -eq 1 ] && python - "$tmp_dir/misp-export.json" <<'PY' || export_ok=0
+import json,sys
+try:
+    doc=json.load(open(sys.argv[1])); e=doc['Event']; attrs=e['Attribute']; types={a['type'] for a in attrs}
+    assert isinstance(e.get('info'),str) and isinstance(attrs,list), 'invalid Event structure'
+    assert {'domain','ip-dst','url','sha256'} <= types, 'expected target/hash attribute missing'
+    assert all(a.get('to_ids') is False for a in attrs), 'unexpected to_ids=true'
+    assert e.get('published') is False, 'unexpected published=true'
+    assert e.get('threat_level_id') == '1' and e.get('analysis') == 0 and e.get('distribution') == 0, 'unexpected non-neutral transport defaults'
+    assert not any(k in e for k in ('org','orgc','sharing_group_id','Galaxy','GalaxyCluster')), 'invented attribution/sharing semantics'
+    assert not any(k in json.dumps(e).lower() for k in ('malware','threat actor','campaign','incident','attribution','risk score')), 'invented threat semantics'
+    assert not any('/data/' in json.dumps(a) or 'qualification-' in json.dumps(a) for a in attrs), 'internal path or credential leaked'
+except (AssertionError, KeyError) as exc:
+    print(f'MISP export semantic check failed: {exc}', file=sys.stderr); raise SystemExit(1)
+PY
+    [ "$export_ok" -eq 1 ] && record "M5.5 MISP export runtime" PASS "Event mappings verified" || record "M5.5 MISP export runtime" FAIL "MISP export failed"
+    [ "$export_ok" -eq 1 ] && record "M5.5 MISP conservative semantics runtime" PASS "to_ids/published/verdict semantics conservative" || record "M5.5 MISP conservative semantics runtime" FAIL "MISP semantics failed"
     # M2 uses the target created through the browser mutation above; no
     # second target is needed and the ID has already been validated.
     m2_ok=1
@@ -454,13 +547,16 @@ PY
        curl -fsS "$base/api/v1/files/$text_file_id/analysis" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["type"] == "file_analysis"' && \
        curl -fsS "$base/api/v1/files/$structured_file_id/analysis" | python -c 'import json,sys; assert any(x["type"]=="archive_analysis" for x in json.load(sys.stdin)["result"]["structured"])' && \
        curl -fsS "$base/api/v1/files/$binary_file_id/candidates" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]' && \
-       curl -fsS "$base/api/v1/files/$m44_file_id/detections" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]'; then
+       curl -fsS "$base/api/v1/files/$m44_file_id/detections" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]' && \
+       curl -fsS "$base/api/v1/cases/$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["case_id"])' "$tmp_dir/taxii-import.json")" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["targets"]' && \
+       curl -fsS "$base/api/v1/cases/$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"]["case_id"])' "$tmp_dir/misp-import.json")" | python -c 'import json,sys; assert json.load(sys.stdin)["result"]["targets"]'; then
         record "persistence" PASS ""
     else
         record "persistence" FAIL "case did not survive restart"
     fi
     docker compose -p "$docker_project" logs >"$tmp_dir/docker.log" 2>&1 || true
     rm -rf "$tmp_dir"
+    kill "$intel_fixture_pid" 2>/dev/null || true
 else
     record "M2 regression" SKIPPED "Docker runtime was not available"
     record "M3.1 provider framework runtime" SKIPPED "Docker runtime was not available"
@@ -471,7 +567,29 @@ else
     record "M4.4 detection runtime" SKIPPED "Docker runtime was not available"
     record "AV disabled behavior" SKIPPED "Docker runtime was not available"
     record "persistence" SKIPPED "Docker runtime was not available"
+    record "M5.5 runtime version" SKIPPED "Docker runtime was not available"
+    record "M5.5 source registry runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 TAXII collections runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 TAXII preview runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 TAXII preview non-mutation runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 TAXII import runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 TAXII import provenance runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 TAXII unsupported diagnostics runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 TAXII no-side-effects runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 TAXII persistence runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 remote MISP preview runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 remote MISP import runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 MISP import provenance runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 MISP unsupported diagnostics runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 MISP no-side-effects runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 MISP persistence runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 MISP export runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 MISP conservative semantics runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 intelligence authority confinement runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 intelligence credential leakage runtime" SKIPPED "Docker runtime was not available"
+    record "M5.5 remote-content XSS runtime" SKIPPED "Docker runtime was not available"
 fi
+unset OSINT_TAXII_ENABLED OSINT_TAXII_URL OSINT_TAXII_TOKEN OSINT_MISP_ENABLED OSINT_MISP_URL OSINT_MISP_API_KEY
 [ -z "${OSINT_TOOLS_PORT_PUBLISHED+x}" ] || docker compose -p "$docker_project" down -v >/dev/null 2>&1 || true
 
 av_project="osint-tools-av-qualify-$$"
@@ -687,6 +805,8 @@ live_provider "live IPinfo" IPINFO_TOKEN osint_tools.providers.ipinfo IPInfoProv
 live_provider "live VirusTotal" VIRUSTOTAL_API_KEY osint_tools.providers.virustotal VirusTotalProvider lookup domain example.com
 live_provider "live AbuseIPDB" ABUSEIPDB_API_KEY osint_tools.providers.abuseipdb AbuseIPDBProvider check ip 1.1.1.1
 live_provider "live Shodan" SHODAN_API_KEY osint_tools.providers.shodan ShodanProvider host ip 1.1.1.1
+if [ -z "${OSINT_TOOLS_TEST_TAXII_URL:-}" ]; then record "live TAXII" SKIPPED "live TAXII test configuration is not set"; else record "live TAXII" SKIPPED "live TAXII qualification is not implemented"; fi
+if [ -z "${OSINT_TOOLS_TEST_MISP_URL:-}" ]; then record "live MISP" SKIPPED "live MISP test configuration is not set"; else record "live MISP" SKIPPED "live MISP qualification is not implemented"; fi
 
 printf '\nQualification matrix\n%s' "$RESULTS"
 exit "$FAILED"

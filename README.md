@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M5.4 Structured Intelligence Interoperability** adds conservative STIX 2.1 export/import alongside the lossless M5.3 case format. M5.3 reporting, M5.2 workflows, M4.5 ClamAV, and all prior local/provider analysis remain available.
+**M5.5 TAXII 2.1 Client + MISP Interoperability** adds bounded operator-configured remote exchange alongside native `.osintcase` and STIX. M5.4/M5.3 reporting, M5.2 workflows, M4.5 ClamAV, and all prior analysis remain available.
 
 ## Run with Docker or Podman
 

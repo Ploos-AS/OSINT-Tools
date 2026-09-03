@@ -15,5 +15,6 @@
 - **M5.2 Interactive Analysis Workspace — complete:** bounded relationship graph, provenance-aware timeline, target-centric navigation, and accessible no-JavaScript fallbacks.
 - **M5.3 Case Export, Import & Reporting — complete:** deterministic JSON, integrity-checked `.osintcase` bundles, safe ID-remapped import, redaction profiles, and printable evidence reports.
 - **M5.4 Structured Intelligence Interoperability — complete:** bounded STIX 2.1 export/import with conservative mappings and provenance-preserving diagnostics.
+- **M5.5 TAXII/MISP interoperability — complete:** bounded operator-configured TAXII retrieval and conservative MISP Event exchange with preview-before-import.
 - **M4 File/Image Intelligence:** later safe parsers may add archives, EXIF and perceptual hashes without executing content.
 - **M5 Release & Polish:** richer web UI, exports, documentation, packaging, security review and release qualification.

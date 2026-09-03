@@ -24,6 +24,8 @@ from .storage import Store
 from . import ui
 from .export import export_json, export_bundle, import_bundle, canonical_case, report_html
 from .stix import export_stix, import_stix
+from .intelligence import builtin_sources, SourceError, taxii_collections, taxii_objects, misp_event
+from .misp import export_event, import_event
 
 HOST = os.environ.get("OSINT_TOOLS_HOST", "0.0.0.0")
 PORT = int(os.environ.get("OSINT_TOOLS_PORT", "8080"))
@@ -87,10 +89,11 @@ AV_MAX_RESPONSE_BYTES = _env_int("OSINT_TOOLS_CLAMAV_MAX_RESPONSE_BYTES", 4096, 
 AV_SCAN_ON_UPLOAD = _env_bool("OSINT_TOOLS_AV_SCAN_ON_UPLOAD", False)
 AV_MAX_ENGINES = _env_int("OSINT_TOOLS_AV_MAX_ENGINES", 4, 1, 32)
 AV_REGISTRY = AVRegistry([ClamAVEngine(_env_bool("OSINT_TOOLS_CLAMAV_ENABLED", False), os.environ.get("OSINT_TOOLS_CLAMAV_HOST", "clamav"), _env_int("OSINT_TOOLS_CLAMAV_PORT", 3310, 1, 65535))])
+INTELLIGENCE_SOURCES = builtin_sources()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OSINT-Tools/0.5.4"
+    server_version = "OSINT-Tools/0.5.5"
 
     def log_message(self, fmt, *args):
         print(f"{self.address_string()} - {fmt % args}")
@@ -194,10 +197,19 @@ class Handler(BaseHTTPRequestHandler):
                 doc = export_stix(STORE, int(parts[3]))
                 if doc is None: return self._json(404, {"ok": False, "error": "case not found"})
                 return self._bytes(200, json.dumps(doc, sort_keys=True, separators=(",", ":")).encode(), "application/stix+json", f"case-{int(parts[3])}.stix.json")
+            if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "misp":
+                doc = export_event(STORE, int(parts[3]))
+                if doc is None: return self._json(404, {"ok": False, "error": "case not found"})
+                return self._bytes(200, json.dumps(doc, sort_keys=True, separators=(",", ":")).encode(), "application/json; charset=utf-8", f"case-{int(parts[3])}.misp.json")
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "bundle":
                 raw = export_bundle(STORE, FILE_STORE, int(parts[3]), q.get("redaction", ["none"])[0], q.get("bodies", ["full"])[0] != "metadata-only")
                 if raw is None: return self._json(404, {"ok": False, "error": "case not found"})
                 return self._bytes(200, raw, "application/zip", f"case-{int(parts[3])}.osintcase")
+            if parsed.path == "/api/v1/intelligence/sources": return self._json(200, {"ok": True, "result": [s.status() for s in INTELLIGENCE_SOURCES.list()]})
+            if len(parts) == 6 and parts[:4] == ["api", "v1", "intelligence", "sources"] and parts[5] == "collections":
+                source=INTELLIGENCE_SOURCES.get(parts[4])
+                if source is None: return self._json(404, {"ok": False, "error": "source not found"})
+                return self._json(200, {"ok": True, "result": taxii_collections(source)})
             if len(parts) == 2 and parts[0] == "cases":
                 case = STORE.get_case(int(parts[1]))
                 if case is None: return self._html(404, ui.page("Case not found", '<p class="error">Case not found.</p>'))
@@ -223,7 +235,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M5.3", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M5.5", "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
             if parsed.path == "/api/v1/av/engines":
                 return self._json(200, {"ok": True, "result": [engine.status() for engine in AV_REGISTRY.list()[:AV_MAX_ENGINES]]})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "graph":
@@ -351,6 +363,24 @@ class Handler(BaseHTTPRequestHandler):
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0 or length > 16 * 1024 * 1024: raise ValueError("invalid STIX bundle size")
                 return self._json(201, {"ok": True, "result": import_stix(STORE, self.rfile.read(length))})
+            if parts == ["api", "v1", "cases", "import", "misp"]:
+                return self._json(201, {"ok": True, "result": import_event(STORE, self._body(4 * 1024 * 1024))})
+            if len(parts) == 7 and parts[:4] == ["api", "v1", "intelligence", "sources"] and parts[5] in {"taxii", "misp"} and parts[6] in {"preview", "import"}:
+                source=INTELLIGENCE_SOURCES.get(parts[4])
+                if source is None: raise SourceError("source_not_found", "source not found", 404)
+                body=self._body(4 * 1024 * 1024)
+                doc=taxii_objects(source, body.get("collection", ""), body.get("limit", 100)) if parts[5] == "taxii" else misp_event(source, str(body.get("event", "")))
+                if parts[6] == "preview": return self._json(200, {"ok": True, "result": {"source": source.name, "kind": source.kind, "objects": len(doc.get("objects", [])) if isinstance(doc, dict) else 0, "lossy": True}})
+                provenance={"transport":source.kind,"source":source.name,"source_hostname":source.hostname,"collection":body.get("collection")} if source.kind == "taxii" else {"source_format":"MISP","source":source.name,"source_hostname":source.hostname,"event":body.get("event")}
+                return self._json(201, {"ok": True, "result": import_stix(STORE, json.dumps(doc).encode(), provenance) if source.kind == "taxii" else import_event(STORE, doc, provenance)})
+            if len(parts) == 6 and parts[:4] == ["api", "v1", "intelligence", "sources"] and parts[5] in {"preview", "import"}:
+                source = INTELLIGENCE_SOURCES.get(parts[4])
+                if source is None: raise SourceError("source_not_found", "source not found", 404)
+                body = self._body(4 * 1024 * 1024)
+                doc = taxii_objects(source, body.get("collection", ""), body.get("limit", 100)) if source.kind == "taxii" else misp_event(source, str(body.get("event", "")))
+                if parts[5] == "preview": return self._json(200, {"ok": True, "result": {"source": source.name, "kind": source.kind, "objects": len(doc.get("objects", [])) if isinstance(doc, dict) else 0, "lossy": True}})
+                provenance={"transport":source.kind,"source":source.name,"source_hostname":source.hostname,"collection":body.get("collection")} if source.kind == "taxii" else {"source_format":"MISP","source":source.name,"source_hostname":source.hostname,"event":body.get("event")}
+                return self._json(201, {"ok": True, "result": import_stix(STORE, json.dumps(doc).encode(), provenance) if source.kind == "taxii" else import_event(STORE, doc, provenance)})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "files":
                 if self.headers.get("Transfer-Encoding"):
                     raise FileError("unsupported_transfer_encoding", "content length is required", 411)
@@ -416,6 +446,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(404, {"ok": False, "error": "not found"})
         except ProviderError as exc:
             return self._provider_error(exc)
+        except SourceError as exc:
+            return self._json(exc.status, {"ok": False, "error": {"code": exc.code, "message": exc.message}})
         except FileError as exc:
             if parts and parts[0] == "ui": return self._ui_error(exc.status, exc.message)
             return self._json(exc.status, {"ok": False, "error": exc.payload()})
@@ -460,7 +492,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M5.4 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools M5.5 listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 
