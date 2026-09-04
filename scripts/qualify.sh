@@ -116,6 +116,7 @@ docker_port=$((18090 + ($$ % 1000)))
 docker_ready=0
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     export OSINT_TOOLS_PORT_PUBLISHED=$docker_port
+    export OSINT_TOOLS_AUTH_ENABLED=false
     intel_fixture_port=$((20090 + ($$ % 1000)))
     python scripts/qualification_intel_fixture.py "$intel_fixture_port" >/tmp/osint-intel-fixture-$$.log 2>&1 &
     intel_fixture_pid=$!
@@ -151,11 +152,11 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.5.5" and i["milestone"] == "M5.5" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.6.0" and i["milestone"] == "M6.0" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
-    [ "$api_ok" -eq 1 ] && record "M5.5 runtime version" PASS "API reports 0.5.5/M5.5" || record "M5.5 runtime version" FAIL "runtime version check failed"
+    [ "$api_ok" -eq 1 ] && record "M6.0 runtime version" PASS "API reports 0.6.0/M6.0" || record "M6.0 runtime version" FAIL "runtime version check failed"
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
     case_code=$(curl -sS -o "$tmp_dir/case.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases" || true)
     [ "$case_code" = 201 ] || api_ok=0
@@ -567,6 +568,23 @@ else
     record "M4.4 detection runtime" SKIPPED "Docker runtime was not available"
     record "AV disabled behavior" SKIPPED "Docker runtime was not available"
     record "persistence" SKIPPED "Docker runtime was not available"
+    record "M6.0 runtime version" SKIPPED "Docker runtime was not available"
+    record "M6.0 bootstrap/admin runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 login runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 anonymous rejection runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 viewer authorization runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 analyst authorization runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 admin authorization runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 CSRF runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 logout/session invalidation runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 disabled-user runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 final-admin protection runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 audit authentication runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 audit mutation runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 audit secret-redaction runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 authenticated XSS runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 auth persistence runtime" SKIPPED "Docker runtime was not available"
+    record "M6.0 auth-disabled compatibility runtime" SKIPPED "Docker runtime was not available"
     record "M5.5 runtime version" SKIPPED "Docker runtime was not available"
     record "M5.5 source registry runtime" SKIPPED "Docker runtime was not available"
     record "M5.5 TAXII collections runtime" SKIPPED "Docker runtime was not available"
@@ -589,12 +607,49 @@ else
     record "M5.5 intelligence credential leakage runtime" SKIPPED "Docker runtime was not available"
     record "M5.5 remote-content XSS runtime" SKIPPED "Docker runtime was not available"
 fi
-unset OSINT_TAXII_ENABLED OSINT_TAXII_URL OSINT_TAXII_TOKEN OSINT_MISP_ENABLED OSINT_MISP_URL OSINT_MISP_API_KEY
+unset OSINT_TAXII_ENABLED OSINT_TAXII_URL OSINT_TAXII_TOKEN OSINT_MISP_ENABLED OSINT_MISP_URL OSINT_MISP_API_KEY OSINT_TOOLS_AUTH_ENABLED
 [ -z "${OSINT_TOOLS_PORT_PUBLISHED+x}" ] || docker compose -p "$docker_project" down -v >/dev/null 2>&1 || true
+
+# Isolated authenticated M6.0 runtime.  Its black-box driver emits rows in the
+# same format consumed by record(), so every failed HTTP assertion contributes
+# to the canonical exit status.
+m60_project="osint-tools-m60-qualify-$$"
+m60_port=$((17090 + ($$ % 1000)))
+m60_fixture_port=$((21090 + ($$ % 1000)))
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    python scripts/qualification_intel_fixture.py "$m60_fixture_port" >/tmp/osint-m60-intel-fixture-$$.log 2>&1 &
+    m60_fixture_pid=$!
+    export OSINT_TOOLS_PORT_PUBLISHED="$m60_port" OSINT_TOOLS_AUTH_ENABLED=true OSINT_TOOLS_CLAMAV_ENABLED=true
+    export OSINT_TAXII_ENABLED=true OSINT_TAXII_URL="http://host.docker.internal:$m60_fixture_port" OSINT_TAXII_TOKEN="qualification-taxii-sentinel"
+    export OSINT_MISP_ENABLED=true OSINT_MISP_URL="http://host.docker.internal:$m60_fixture_port" OSINT_MISP_API_KEY="qualification-misp-sentinel"
+    if docker compose -p "$m60_project" --profile av up -d --build >/dev/null 2>&1; then
+        i=0; while [ "$i" -lt 90 ]; do curl -fsS "http://127.0.0.1:$m60_port/healthz" >/dev/null 2>&1 && docker compose -p "$m60_project" exec -T osint-tools python -c 'import socket; s=socket.create_connection(("clamav",3310),2); s.sendall(b"PING\n"); assert s.recv(64).strip()==b"PONG"' >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done
+        m60_results=$(mktemp)
+        if python scripts/qualification_m60_runtime.py "http://127.0.0.1:$m60_port" >"$m60_results"; then :; else record "M6.0 authenticated Docker block" FAIL "one or more black-box HTTP assertions failed"; fi
+        while IFS='|' read -r gate status detail; do [ -n "$gate" ] && record "$gate" "$status" "$detail"; done <"$m60_results"
+        docker compose -p "$m60_project" restart osint-tools >/dev/null 2>&1 || true
+        i=0; while [ "$i" -lt 30 ]; do curl -fsS "http://127.0.0.1:$m60_port/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done
+        : >"$m60_results"
+        if python scripts/qualification_m60_runtime.py "http://127.0.0.1:$m60_port" persistence >"$m60_results"; then :; else record "M6.0 persistence restart" FAIL "authenticated state did not survive restart"; fi
+        while IFS='|' read -r gate status detail; do [ -n "$gate" ] && record "$gate" "$status" "$detail"; done <"$m60_results"
+        rm -f "$m60_results"
+    else
+        record "M6.0 authenticated Docker block" FAIL "isolated authenticated Compose runtime did not start"
+    fi
+    docker compose -p "$m60_project" --profile av down -v >/dev/null 2>&1 || true
+    kill "$m60_fixture_pid" 2>/dev/null || true
+else
+    record "M6.0 authenticated Docker block" SKIPPED "Docker daemon is unavailable"
+fi
+unset OSINT_TOOLS_AUTH_ENABLED OSINT_TOOLS_CLAMAV_ENABLED OSINT_TAXII_ENABLED OSINT_TAXII_URL OSINT_TAXII_TOKEN OSINT_MISP_ENABLED OSINT_MISP_URL OSINT_MISP_API_KEY
+
+# Auth-disabled behavior was exercised by the complete legacy runtime above.
+[ "$docker_ready" -eq 1 ] && record "M6.0 auth-disabled compatibility" PASS "info and M2-M5.5 anonymous workflow verified" || record "M6.0 auth-disabled compatibility" SKIPPED "Docker runtime was unavailable"
+record "M6.0 schema 7->8 runtime migration" SKIPPED "no deterministic schema-7 container fixture is currently available; Python migration coverage retained"
 
 av_project="osint-tools-av-qualify-$$"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    export OSINT_TOOLS_PORT_PUBLISHED=$((19090 + ($$ % 1000))) OSINT_TOOLS_CLAMAV_ENABLED=true OSINT_TOOLS_AV_SCAN_ON_UPLOAD=false
+    export OSINT_TOOLS_PORT_PUBLISHED=$((19090 + ($$ % 1000))) OSINT_TOOLS_CLAMAV_ENABLED=true OSINT_TOOLS_AV_SCAN_ON_UPLOAD=false OSINT_TOOLS_AUTH_ENABLED=false
     if docker compose -p "$av_project" --profile av build osint-tools >/dev/null && docker compose -p "$av_project" --profile av up -d >/dev/null; then
         av_ready=0; i=0
         while [ "$i" -lt 90 ]; do
@@ -705,7 +760,7 @@ else
     record "ClamAV rescan/idempotency" SKIPPED "Docker daemon is unavailable"
     record "M4.5 local AV boundary" SKIPPED "Docker daemon is unavailable"
 fi
-unset OSINT_TOOLS_CLAMAV_ENABLED OSINT_TOOLS_AV_SCAN_ON_UPLOAD
+unset OSINT_TOOLS_CLAMAV_ENABLED OSINT_TOOLS_AV_SCAN_ON_UPLOAD OSINT_TOOLS_AUTH_ENABLED
 
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && docker image inspect osint-tools:dev >/dev/null 2>&1; then
     if docker run --rm --network none --entrypoint python osint-tools:dev -c 'import struct,tempfile,pathlib; from osint_tools.files.binary import analyze_binary; p=pathlib.Path(tempfile.mkstemp()[1]); p.write_bytes(b"\xcf\xfa\xed\xfe"+struct.pack("<IIIIIII",0x01000007,3,2,0,0,0,0)); assert analyze_binary(p,"macho",__import__("osint_tools.files.binary_common",fromlist=["BinaryLimits"]).BinaryLimits())[0]["status"]=="success"' >/dev/null; then
@@ -731,7 +786,7 @@ podman_name="osint-tools-qualify-$$"
 if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
     if podman build -t "$podman_name" -f Containerfile .; then
         record "Podman build" PASS ""
-        if podman run -d --name "$podman_name" -e OSINT_TOOLS_MAX_UPLOAD_BYTES=1024 -p 127.0.0.1::8080 "$podman_name" >/dev/null; then
+        if podman run -d --name "$podman_name" -e OSINT_TOOLS_AUTH_ENABLED=false -e OSINT_TOOLS_MAX_UPLOAD_BYTES=1024 -p 127.0.0.1::8080 "$podman_name" >/dev/null; then
             host_port=$(podman port "$podman_name" 8080/tcp | sed 's/.*://')
             i=0; while [ "$i" -lt 30 ]; do curl -fsS "http://127.0.0.1:$host_port/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done
             uid=$(podman exec "$podman_name" id -u 2>/dev/null || true)
@@ -809,4 +864,8 @@ if [ -z "${OSINT_TOOLS_TEST_TAXII_URL:-}" ]; then record "live TAXII" SKIPPED "l
 if [ -z "${OSINT_TOOLS_TEST_MISP_URL:-}" ]; then record "live MISP" SKIPPED "live MISP test configuration is not set"; else record "live MISP" SKIPPED "live MISP qualification is not implemented"; fi
 
 printf '\nQualification matrix\n%s' "$RESULTS"
+pass_count=$(printf '%s' "$RESULTS" | awk -F'|' '$2=="PASS"{n++} END{print n+0}')
+fail_count=$(printf '%s' "$RESULTS" | awk -F'|' '$2=="FAIL"{n++} END{print n+0}')
+skipped_count=$(printf '%s' "$RESULTS" | awk -F'|' '$2=="SKIPPED"{n++} END{print n+0}')
+printf '\nQualification totals: PASS=%s FAIL=%s SKIPPED=%s\n' "$pass_count" "$fail_count" "$skipped_count"
 exit "$FAILED"

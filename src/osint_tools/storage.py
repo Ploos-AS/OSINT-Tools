@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def utcnow() -> str:
@@ -221,6 +221,38 @@ class Store:
                     signature TEXT NOT NULL,
                     metadata_json TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    display_name TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL CHECK(role IN ('admin','analyst','viewer')),
+                    enabled INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_login_at TEXT
+                );
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    csrf_hash TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    timestamp TEXT NOT NULL,
+                    actor_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    actor_username TEXT,
+                    action TEXT NOT NULL,
+                    object_type TEXT,
+                    object_id TEXT,
+                    outcome TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_audit_events_time ON audit_events(id DESC);
                 """
             )
             relationship_columns = {row[1] for row in conn.execute("PRAGMA table_info(relationships)")}
@@ -309,6 +341,64 @@ class Store:
         with self.connect() as conn:
             cur = conn.execute("DELETE FROM cases WHERE id=?", (case_id,))
         return bool(cur.rowcount)
+
+    def count_users(self) -> int:
+        with self.connect() as conn: return int(conn.execute("SELECT COUNT(*) FROM users").fetchone()[0])
+
+    def create_user(self, username: str, display_name: str, password_hash: str, role: str = "viewer") -> dict[str, Any]:
+        now = utcnow()
+        with self.connect() as conn:
+            cur = conn.execute("INSERT INTO users(username,display_name,password_hash,role,created_at,updated_at) VALUES(?,?,?,?,?,?)", (username, display_name, password_hash, role, now, now))
+            row = conn.execute("SELECT id,username,display_name,role,enabled,created_at,updated_at,last_login_at FROM users WHERE id=?", (cur.lastrowid,)).fetchone()
+        return dict(row)
+
+    def get_user(self, user_id: int) -> dict[str, Any] | None:
+        with self.connect() as conn: row = conn.execute("SELECT * FROM users WHERE id=?", (user_id,)).fetchone()
+        return self._row(row)
+
+    def get_user_by_username(self, username: str) -> dict[str, Any] | None:
+        with self.connect() as conn: row = conn.execute("SELECT * FROM users WHERE username=? COLLATE NOCASE", (username,)).fetchone()
+        return self._row(row)
+
+    def list_users(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self.connect() as conn: rows = conn.execute("SELECT id,username,display_name,role,enabled,created_at,updated_at,last_login_at FROM users ORDER BY id LIMIT ?", (max(1,min(limit,1000)),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def update_user(self, user_id: int, **fields) -> dict[str, Any] | None:
+        allowed={k:v for k,v in fields.items() if k in {'display_name','role','enabled','password_hash'} and v is not None}
+        if not allowed: return self.get_user(user_id)
+        allowed['updated_at']=utcnow(); sets=', '.join(f'{k}=?' for k in allowed)
+        with self.connect() as conn:
+            conn.execute(f"UPDATE users SET {sets} WHERE id=?", (*allowed.values(), user_id))
+        return self.get_user(user_id)
+
+    def touch_login(self, user_id: int) -> None:
+        with self.connect() as conn: conn.execute("UPDATE users SET last_login_at=?, updated_at=? WHERE id=?", (utcnow(),utcnow(),user_id))
+
+    def create_session(self, token_hash: str, user_id: int, csrf_hash: str, expires_at: str) -> None:
+        with self.connect() as conn: conn.execute("INSERT INTO sessions(token_hash,user_id,csrf_hash,created_at,expires_at) VALUES(?,?,?,?,?)", (token_hash,user_id,csrf_hash,utcnow(),expires_at))
+
+    def get_session(self, token_hash: str) -> dict[str, Any] | None:
+        with self.connect() as conn: row=conn.execute("SELECT s.*,u.username,u.display_name,u.role,u.enabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=?", (token_hash,)).fetchone()
+        return self._row(row)
+
+    def delete_session(self, token_hash: str) -> None:
+        with self.connect() as conn: conn.execute("DELETE FROM sessions WHERE token_hash=?", (token_hash,))
+
+    def add_audit(self, action: str, outcome: str, actor_user_id: int | None = None, actor_username: str | None = None, object_type: str | None = None, object_id: str | None = None, metadata: Any = None) -> dict[str, Any]:
+        payload=json.dumps(metadata or {}, separators=(",",":"), sort_keys=True)
+        if len(payload)>8192: payload=json.dumps({"truncated": True}, separators=(",",":"))
+        with self.connect() as conn:
+            cur=conn.execute("INSERT INTO audit_events(timestamp,actor_user_id,actor_username,action,object_type,object_id,outcome,metadata_json) VALUES(?,?,?,?,?,?,?,?)", (utcnow(),actor_user_id,actor_username,action,object_type,object_id,outcome,payload))
+            row=conn.execute("SELECT * FROM audit_events WHERE id=?",(cur.lastrowid,)).fetchone()
+        d=dict(row); d['metadata']=json.loads(d.pop('metadata_json')); return d
+
+    def list_audit(self, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        with self.connect() as conn: rows=conn.execute("SELECT * FROM audit_events ORDER BY id DESC LIMIT ? OFFSET ?", (max(1,min(limit,200)),max(0,offset))).fetchall()
+        out=[]
+        for r in rows:
+            d=dict(r); d['metadata']=json.loads(d.pop('metadata_json')); out.append(d)
+        return out
 
     def add_target(self, case_id: int, target_type: str, value: str, normalized: str) -> dict[str, Any]:
         now = utcnow()

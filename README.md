@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M5.5 TAXII 2.1 Client + MISP Interoperability** adds bounded operator-configured remote exchange alongside native `.osintcase` and STIX. M5.4/M5.3 reporting, M5.2 workflows, M4.5 ClamAV, and all prior analysis remain available.
+**M6.0 Authentication, RBAC and Audit Trail** adds local users, sessions, role authorization and bounded security auditing. M5.5 interoperability and all prior analysis remain available.
 
 ## Run with Docker or Podman
 

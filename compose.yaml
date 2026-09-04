@@ -9,6 +9,7 @@ services:
     volumes:
       - osint-tools-data:/data
     environment:
+      OSINT_TOOLS_AUTH_ENABLED: "${OSINT_TOOLS_AUTH_ENABLED:-true}"
       OSINT_TAXII_ENABLED: "${OSINT_TAXII_ENABLED:-false}"
       OSINT_TAXII_URL: "${OSINT_TAXII_URL:-}"
       OSINT_TAXII_TOKEN: "${OSINT_TAXII_TOKEN:-}"

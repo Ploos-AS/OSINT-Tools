@@ -54,7 +54,7 @@ def test_schema_two_migrates_without_data_loss(tmp_path):
     assert store.get_case(1)["name"] == "preserved"
     with store.connect() as migrated:
         assert "artifact_id" in {row[1] for row in migrated.execute("PRAGMA table_info(relationships)")}
-        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert migrated.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
         tables = {row[0] for row in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"file_objects", "files", "file_structured_artifacts"} <= tables
 
@@ -69,7 +69,7 @@ def test_schema_three_adds_structured_artifact_association(tmp_path):
     migrated = Store(path)
     assert migrated.get_case(case["id"])["name"] == "preserved schema 3"
     with migrated.connect() as conn:
-        assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
 
 
 def test_schema_four_adds_binary_candidates_without_data_loss(tmp_path):
@@ -80,6 +80,6 @@ def test_schema_four_adds_binary_candidates_without_data_loss(tmp_path):
     migrated = Store(path)
     assert migrated.get_case(case["id"])["name"] == "preserved schema 4"
     with migrated.connect() as conn:
-        assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "7"
+        assert conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()[0] == "8"
         assert {row[1] for row in conn.execute("PRAGMA table_info(file_candidates)")} >= {"file_id", "artifact_id", "normalized_value", "offset"}
         assert conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='file_structured_artifacts'").fetchone()
