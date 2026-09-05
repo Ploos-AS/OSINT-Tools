@@ -20,7 +20,7 @@ def page(title: str, body: str, case: dict | None = None) -> bytes:
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{esc(title)} · OSINT Tools</title><link rel="stylesheet" href="/static/app.css"></head>
-<body><header class="topbar"><a class="brand" href="/cases">OSINT Tools <span>0.6.0</span></a>
+<body><header class="topbar"><a class="brand" href="/cases">OSINT Tools <span>0.6.1</span></a>
 <nav aria-label="Primary"><a href="/cases">Cases</a>{case_link}</nav></header>
 <main class="shell"><h1>{esc(title)}</h1>{body}</main>
 <script src="/static/app.js" defer></script></body></html>"""
@@ -87,3 +87,41 @@ def file_detail(file: dict, analysis: dict | None, detections: list[dict], av: l
 <section class="card"><h2>Candidate indicators</h2>{"<ul class=items>"+cand+"</ul>" if cand else "<p class=empty>None.</p>"}</section>
 <section class="card"><h2>Local detections</h2>{"<ul class=items>"+det+"</ul>" if det else "<p class=empty>None.</p>"}</section>
 <section class="card"><h2>Antivirus evidence</h2>{scan}{"<ul class=items>"+av_rows+"</ul>" if av_rows else "<p class=empty>Not scanned.</p>"}</section>'''
+
+
+def read_only(document: bytes) -> bytes:
+    """Remove mutation forms from our escaped server-rendered markup."""
+    import re
+    return re.sub(rb'<form\b[^>]*method="post"[^>]*>.*?</form>', b'', document, flags=re.DOTALL)
+
+
+def api_form(action, fields, label, method='POST'):
+    return f'<form method="post" action="{esc(action)}" class="api-form" data-method="{esc(method)}">{fields}<button type="submit">{esc(label)}</button><output aria-live="polite"></output></form>'
+
+
+def case_access(case, access, owner, grants):
+    cid=case['id']; base=f'/api/v1/cases/{cid}'
+    result=f'<section class="card"><h2>Case access</h2><p>Owner: {esc(owner)} (user ID {esc(case.get("owner_user_id"))})</p><p>Effective access: {esc(access)}</p>'
+    if access=='owner':
+        result+='<h3>Direct and team grants</h3><ul>'
+        for grant in grants:
+            result+=f'<li>{esc(grant["principal_type"])} {esc(grant["principal_id"])}: {esc(grant["display_name"])} — {esc(grant["access"])}'
+            result+=api_form(f'{base}/acl/{grant["id"]}', '<label>Access <select name="access"><option>viewer</option><option>editor</option></select></label>', 'Change grant','PATCH')
+            result+=api_form(f'{base}/acl/{grant["id"]}', '', 'Revoke grant','DELETE')+'</li>'
+        result+='</ul>'
+        result+=api_form(base+'/acl','<label>Principal <select name="principal_type"><option>user</option><option>team</option></select></label><label>Principal ID <input type="number" min="1" name="principal_id" required></label><label>Access <select name="access"><option>viewer</option><option>editor</option></select></label>','Grant access')
+        result+=api_form(base+('/claim' if case.get('owner_user_id') is None else '/owner'),'<label>New owner user ID <input type="number" min="1" name="owner_user_id" required></label>','Assign owner','POST' if case.get('owner_user_id') is None else 'PATCH')
+    return result+'</section>'
+
+
+def teams(teams, memberships):
+    fields='<label>Name <input name="name" maxlength="200" required></label><label>Description <textarea name="description" maxlength="4000"></textarea></label>'
+    result='<p>Administrators manage explicit membership. Disabled teams grant no case access.</p>'+api_form('/api/v1/admin/teams',fields,'Create team')
+    for team in teams:
+        base=f'/api/v1/admin/teams/{team["id"]}'
+        result+=f'<section class="card"><h2>{esc(team["name"])}</h2><p>Team ID {team["id"]}</p><p>{esc(team["description"])}</p>'
+        result+=api_form(base,f'<label>Name <input name="name" value="{esc(team["name"])}" required maxlength="200"></label><label>Description <textarea name="description" maxlength="4000">{esc(team["description"])}</textarea></label><label>Enabled <select name="enabled"><option value="true"{" selected" if team["enabled"] else ""}>Yes</option><option value="false"{" selected" if not team["enabled"] else ""}>No</option></select></label>','Update team','PATCH')
+        for member in memberships[team['id']]:
+            result+=f'<p>{esc(member["display_name"])} ({esc(member["username"])}, user ID {member["user_id"]})</p>'+api_form(base+f'/members/{member["user_id"]}','','Remove member','DELETE')
+        result+=api_form(base+'/members','<label>User ID <input type="number" min="1" name="user_id" required></label>','Add member')+'</section>'
+    return result

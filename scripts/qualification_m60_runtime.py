@@ -27,7 +27,7 @@ def main():
   row("M6.0 auth persistence",sa==200 and sn==200 and bn.get("result",{}).get("role")=="analyst" and sv==401 and len(au.get("result",[]))>0)
   for n,s,d in rows: print(f"{n}|{s}|{d}")
   return 0 if all(s=="PASS" for _,s,_ in rows) else 1
- anon=Client(); s,i,_=anon.call("GET","/api/v1/info"); row("M6.0 runtime version",s==200 and i["version"]=="0.6.0")
+ anon=Client(); s,i,_=anon.call("GET","/api/v1/info"); row("M6.0 compatibility version",s==200 and i["version"]=="0.6.1")
  row("M6.0 auth enabled default",i.get("auth_enabled") is True); row("M6.0 bootstrap required",i.get("bootstrap_required") is True)
  s,b,_=anon.call("POST","/api/v1/auth/bootstrap",{"username":"admin","display_name":"Admin","password":PASSWORD},False); row("M6.0 bootstrap first admin",s==201)
  admin_id=b.get("result",{}).get("id"); s,_,_=anon.call("POST","/api/v1/auth/bootstrap",{"username":"other","password":PASSWORD},False); row("M6.0 bootstrap closed",s==409)
@@ -47,6 +47,7 @@ def main():
  old=analyst.csrf; analyst.csrf="wrong"; s,_,_=analyst.call("PATCH",f"/api/v1/cases/{case_id}",{"status":"open"}); row("M6.0 analytical CSRF wrong",s==403); analyst.csrf=viewer.csrf; s,_,_=analyst.call("PATCH",f"/api/v1/cases/{case_id}",{"status":"open"}); row("M6.0 CSRF cross-session rejection",s==403); analyst.csrf=old
  s,_,_=analyst.call("PATCH",f"/api/v1/cases/{case_id}?csrf_token={old}",{"status":"open"},False); row("M6.0 CSRF query-string-only rejection",s==403)
  s,b,_=analyst.call("POST",f"/api/v1/cases/{case_id}/targets",{"value":"1.1.1.1"}); target_id=b.get("result",{}).get("id")
+ analyst.call("POST",f"/api/v1/cases/{case_id}/acl",{"principal_type":"user","principal_id":users["viewer"],"access":"viewer"})
  s,_,_=analyst.call("POST",f"/api/v1/targets/{target_id}/enrich",{}); row("M6.0 provider audit action",s==200)
  raw=b"qualification upload"; s,b,_=analyst.call("POST",f"/api/v1/cases/{case_id}/files",raw,True,"application/octet-stream"); file_id=b.get("result",{}).get("id"); row("M6.0 file upload action",s==201)
  s,_,_=viewer.call("POST",f"/api/v1/files/{file_id}/av/scan",{"engines":["clamav"]}); row("M6.0 viewer AV mutation denied",s==403)

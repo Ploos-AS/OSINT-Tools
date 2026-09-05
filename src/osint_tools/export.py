@@ -8,6 +8,7 @@ import re
 import zipfile
 from datetime import datetime, timezone
 from typing import Any
+from . import __version__
 
 FORMAT = "osint-tools-case"
 FORMAT_VERSION = 1
@@ -34,9 +35,9 @@ def canonical_case(store, case_id: int, profile: str = "none") -> dict[str, Any]
         "format": FORMAT,
         "format_version": FORMAT_VERSION,
         "exported_at": None,
-        "application": {"name": "OSINT Tools", "version": "0.5.3"},
+        "application": {"name": "OSINT Tools", "version": __version__},
         "redaction": {"profile": profile, "categories": []},
-        "case": dict(case),
+        "case": {k:v for k,v in case.items() if k != "owner_user_id"},
         "targets": sorted(case["targets"], key=lambda x: x["id"]),
         "artifacts": [], "relationships": sorted(case["relationships"], key=lambda x: x["id"]),
         "notes": [], "files": [], "structured_artifacts": [], "candidates": [], "detections": [], "av_results": [],
@@ -110,7 +111,7 @@ def _safe_entry(name: str) -> bool:
     return bool(name and not name.startswith(("/", "\\")) and ".." not in name.replace("\\", "/").split("/")) and not re.match(r"^[A-Za-z]:", name)
 
 
-def import_bundle(store, objects, raw: bytes) -> dict[str, Any]:
+def import_bundle(store, objects, raw: bytes, *, owner_user_id=None) -> dict[str, Any]:
     if len(raw) > MAX_BUNDLE_BYTES: raise ValueError("bundle exceeds maximum size")
     try: z = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile: raise ValueError("invalid case bundle") from None
@@ -135,8 +136,11 @@ def import_bundle(store, objects, raw: bytes) -> dict[str, Any]:
     # Restore a new case and remap all authoritative IDs in one transaction.
     original = payload.get("case") or {}
     with store.connect() as conn:
+        from .case_access import validate_owner, audit
+        if owner_user_id is not None: validate_owner(conn, owner_user_id)
         now = datetime.now(timezone.utc).isoformat()
-        cur = conn.execute("INSERT INTO cases(name,description,status,created_at,updated_at) VALUES(?,?,?,?,?)", (str(original.get("name", "Imported case"))[:200], str(original.get("description", ""))[:4000], str(original.get("status", "open")), original.get("created_at", now), now))
+        cur = conn.execute("INSERT INTO cases(name,description,status,created_at,updated_at,owner_user_id) VALUES(?,?,?,?,?,?)", (str(original.get("name", "Imported case"))[:200], str(original.get("description", ""))[:4000], str(original.get("status", "open")), original.get("created_at", now), now, owner_user_id))
+        audit(conn,"case_created",owner_user_id,{"case_id":cur.lastrowid,"owner_user_id":owner_user_id})
         new_case = int(cur.lastrowid); target_map: dict[int, int] = {}; artifact_map: dict[int, int] = {}; file_map: dict[int, int] = {}
         for t in payload.get("targets", []):
             cur = conn.execute("INSERT OR IGNORE INTO targets(case_id,type,value,normalized,created_at) VALUES(?,?,?,?,?)", (new_case, t.get("type", "unknown"), t.get("value", ""), t.get("normalized", ""), t.get("created_at", now)))

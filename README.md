@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M6.0 Authentication, RBAC and Audit Trail** adds local users, sessions, role authorization and bounded security auditing. M5.5 interoperability and all prior analysis remain available.
+**M6.1 Case Ownership, Per-Case ACLs & Teams (0.6.1)** adds case isolation on top of M6.0 authentication/RBAC/audit. Global role and case access are intersected; administrators have an explicit all-case override. See [M6.1 specification](docs/M6_1_SPEC.md) for APIs, migration, trust boundaries and qualification.
 
 ## Run with Docker or Podman
 
@@ -48,3 +48,13 @@ The same OCI image is intended for Docker and Podman, amd64 and arm64, and runs 
 Open `http://localhost:8080/` for the browser workspace. UI mutations are same-origin checked when a browser supplies an Origin header; authentication remains future work for local/private deployments.
 
 See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/M4_5_SPEC.md`, `docs/M5_1_SPEC.md`, `docs/M5_2_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
+
+## Case access and teams
+
+New authenticated cases belong to their creator. Owners manage ACLs and ownership; editors modify analytical content; viewers read evidence and export. Global viewers remain read-only regardless of grants. Case lists and all case/target/file routes enforce access on the server. Inaccessible objects return 404.
+
+Administrators manage explicit teams and memberships at `/admin/teams`. Disabled users or teams grant no effective access; re-enabling restores applicable persisted grants. No nested teams or inferred membership is supported.
+
+Schema 9 preserves existing evidence and leaves legacy ownership unassigned. With authentication enabled, an administrator explicitly adopts/assigns legacy cases through the workspace or `POST /api/v1/cases/{id}/claim`. Native/STIX/TAXII/MISP imports are owned by the local importer and cannot restore foreign authorization state. Exports omit local owner/ACL/team policy.
+
+`OSINT_TOOLS_AUTH_ENABLED=false` retains system-local administrative behavior without fake users or ACLs. Multi-user isolation requires authentication enabled. Sign in through `/login` for browser mutations using the existing session-bound CSRF header; no-JavaScript browsing remains available. Enterprise identity, MFA, service accounts, nested teams and custom policies are deferred.

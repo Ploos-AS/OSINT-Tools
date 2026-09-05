@@ -92,13 +92,14 @@ def analyze_detections(store, objects, file_record: dict, limits: DetectionLimit
     return store.replace_local_detections(file_record["id"],summary,records)
 
 
-def similar_files(store, file_id: int, limit: int, max_results: int) -> list[dict]:
+def similar_files(store, file_id: int, limit: int, max_results: int, visible_case_ids=None) -> list[dict]:
     file=store.get_file(file_id)
     if file is None: raise KeyError("file not found")
     own=store.get_fingerprint(file["sha256"],ALGORITHM)
     if own is None: return []
     maximum=max(1,min(limit,max_results)); results=[]
     for item in store.similarity_candidates(file_id,ALGORITHM):
+        if visible_case_ids is not None and item["case_id"] not in visible_case_ids: continue
         item["algorithm"]=ALGORITHM; item["distance"]=distance(own["fingerprint"],item.pop("fingerprint")); item["exact_duplicate"]=item["object_sha256"]==file["sha256"]
         results.append(item)
     return sorted(results,key=lambda item:(item["distance"],item["file_id"]))[:maximum]

@@ -37,7 +37,7 @@ def export_stix(store, case_id: int) -> dict | None:
         objects.append(o)
     return {"type":"bundle","id":f"bundle--{uuid.uuid4()}","objects":objects,"x_osint_tools_object_counts":{k:sum(x["type"]==k for x in objects) for k in sorted({x["type"] for x in objects})}}
 
-def import_stix(store, raw: bytes, provenance: dict | None = None) -> dict:
+def import_stix(store, raw: bytes, provenance: dict | None = None, *, owner_user_id=None) -> dict:
     if len(raw)>16*1024*1024: raise ValueError("STIX bundle exceeds maximum size")
     try: doc=json.loads(raw)
     except json.JSONDecodeError: raise ValueError("invalid STIX JSON") from None
@@ -49,7 +49,7 @@ def import_stix(store, raw: bytes, provenance: dict | None = None) -> dict:
         byid[o["id"]]=o
     grouping=next((o for o in objs if o.get("type")=="grouping"),None)
     name=(grouping or {}).get("name") or "Imported STIX case"
-    case=store.create_case(str(name)[:200],str((grouping or {}).get("description", ""))[:4000])
+    case=store.create_case(str(name)[:200],str((grouping or {}).get("description", ""))[:4000], owner_user_id=owner_user_id)
     mapping={}; counts={}; skipped=[]
     for o in objs:
         typ=o.get("type");

@@ -98,13 +98,25 @@ AV_REGISTRY = AVRegistry([ClamAVEngine(_env_bool("OSINT_TOOLS_CLAMAV_ENABLED", F
 INTELLIGENCE_SOURCES = builtin_sources()
 
 
+from .access_http import scoped
+from .case_access import AccessError, visible_cases, effective_case_access
+
+
 class Handler(BaseHTTPRequestHandler):
+    def _case_access_ui(self, case):
+        from .case_access import acl_rows
+        with STORE.connect() as conn:
+            access=effective_case_access(conn,case['id'],self._auth_user(),AUTH_ENABLED)
+            owner=conn.execute('SELECT display_name FROM users WHERE id=?',(case['owner_user_id'],)).fetchone()
+            grants=acl_rows(conn,case['id']) if access=='owner' else []
+        return ui.case_access(case, access, owner[0] if owner else 'Unassigned legacy case', grants)
+
     def _auth_user(self):
-        if not AUTH_ENABLED or not hasattr(self, "headers") or isinstance(self.headers, dict): return {"id":0,"username":"local","role":"admin","enabled":1}
+        if not AUTH_ENABLED: return {"id":0,"username":"local","role":"admin","enabled":1}
         raw=self.headers.get("Cookie",""); c=SimpleCookie(); c.load(raw); token=c.get("osint_session");
         if token:
             s=STORE.get_session(token_hash(token.value))
-            if s and s["enabled"] and datetime.fromisoformat(s["expires_at"]) > datetime.now(timezone.utc): return s
+            if s and s["enabled"] and datetime.fromisoformat(s["expires_at"]) > datetime.now(timezone.utc): return {"id":s["user_id"],"username":s["username"],"display_name":s["display_name"],"role":s["role"],"enabled":s["enabled"]}
         return None
     def _require_auth(self, role="viewer"):
         u=self._auth_user()
@@ -112,15 +124,16 @@ class Handler(BaseHTTPRequestHandler):
         if not allowed(u["role"],role): self._json(403,{"ok":False,"error":{"code":"forbidden","message":"insufficient role"}}); return None
         return u
     def _csrf_ok(self, user):
-        if not AUTH_ENABLED or not hasattr(self, "headers") or isinstance(self.headers, dict): return True
+        if not AUTH_ENABLED: return True
         c=SimpleCookie(); c.load(self.headers.get("Cookie", "")); t=c.get("osint_session")
         if not t: return False
         s=STORE.get_session(token_hash(t.value)); supplied=self.headers.get("X-CSRF-Token", "")
         return bool(s and supplied and hmac.compare_digest(token_hash(supplied), s["csrf_hash"]))
-    server_version = "OSINT-Tools/0.6.0"
+    server_version = "OSINT-Tools/0.6.1"
 
     def log_message(self, fmt, *args):
-        print(f"{self.address_string()} - {fmt % args}")
+        # Do not log query strings: rejected query-only CSRF input may contain a token.
+        print(f"{self.address_string()} - {getattr(self, 'command', 'request')} {urlsplit(getattr(self, 'path', '')).path!r}")
 
     def _json(self, status: int, payload) -> None:
         data = json.dumps(payload).encode("utf-8")
@@ -141,6 +154,13 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(data)
 
     def _html(self, status: int, data: bytes) -> None:
+        if AUTH_ENABLED and self._auth_user():
+            user=self._auth_user()
+            editable=allowed(user['role'],'analyst')
+            case_id=getattr(self,'_case_scope',None)
+            if case_id is not None:
+                with STORE.connect() as conn: editable=effective_case_access(conn,case_id,user,True) in {'editor','owner'}
+            if not editable: data=ui.read_only(data)
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
@@ -189,6 +209,7 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         return parsed, [p for p in parsed.path.split("/") if p]
 
+    @scoped
     def do_GET(self):
         parsed, parts = self._parts()
         q = parse_qs(parsed.query)
@@ -205,9 +226,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200); self.send_header("Content-Type", content_type); self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Cache-Control", "no-store"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data); return
             if parsed.path.startswith("/static/"):
                 return self._json(404, {"ok": False, "error": "not found"})
+            if parsed.path == "/admin/teams":
+                user=self._require_auth("admin")
+                if user is None: return
+                from .case_access import teams_api
+                teams=teams_api(STORE,user,"GET",[],{},AUTH_ENABLED)
+                members={t['id']:teams_api(STORE,user,"GET",[str(t['id']),"members"],{},AUTH_ENABLED) for t in teams}
+                return self._html(200,ui.page("Teams",ui.teams(teams,members)))
             if parsed.path == "/cases":
                 if AUTH_ENABLED and self._auth_user() is None: return self._redirect("/login")
-                return self._html(200, ui.page("Cases", ui.cases(STORE.list_cases())))
+                return self._html(200, ui.page("Cases", ui.cases(visible_cases(STORE,self._auth_user(),AUTH_ENABLED)) + ('<p><a href="/admin/teams">Manage teams</a></p>' if self._auth_user()["role"]=="admin" else "")))
             if parsed.path == "/login":
                 return self._html(200, ui.page("Login", '<h1>Sign in</h1><form method="post" action="/ui/login"><label>Username <input name="username" autocomplete="username"></label><label>Password <input type="password" name="password" autocomplete="current-password"></label><button type="submit">Sign in</button></form>'))
             if AUTH_ENABLED and self._auth_user() is None and parsed.path not in {"/healthz","/api/v1/info","/api/v1/auth/status","/api/v1/auth/me"} and not parsed.path.startswith("/static/"):
@@ -245,7 +273,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[0] == "cases":
                 case = STORE.get_case(int(parts[1]))
                 if case is None: return self._html(404, ui.page("Case not found", '<p class="error">Case not found.</p>'))
-                return self._html(200, ui.page(case["name"], ui.workspace(case, STORE.list_case_files(case["id"])), case))
+                return self._html(200, ui.page(case["name"], ui.workspace(case, STORE.list_case_files(case["id"])) + self._case_access_ui(case), case))
             if len(parts) == 4 and parts[0] == "cases" and parts[2] == "targets":
                 case = STORE.get_case(int(parts[1])); target = STORE.get_target(int(parts[3]))
                 if case is None or target is None or target["case_id"] != case["id"]: return self._html(404, ui.page("Target not found", '<p class="error">Target not found.</p>'))
@@ -267,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M6.0", "auth_enabled": AUTH_ENABLED, "bootstrap_required": AUTH_ENABLED and STORE.count_users()==0, "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M6.1", "auth_enabled": AUTH_ENABLED, "bootstrap_required": AUTH_ENABLED and STORE.count_users()==0, "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
             if parsed.path == "/api/v1/auth/status": return self._json(200,{"ok":True,"result":{"enabled":AUTH_ENABLED,"bootstrap_required":AUTH_ENABLED and STORE.count_users()==0,"user":self._auth_user() if AUTH_ENABLED else None}})
             if parsed.path == "/api/v1/auth/me":
                 u=self._require_auth(); return None if u is None else self._json(200,{"ok":True,"result":{"id":u["id"],"username":u["username"],"display_name":u.get("display_name",u["username"]),"role":u["role"]}})
@@ -309,7 +337,7 @@ class Handler(BaseHTTPRequestHandler):
                 except KeyError: return self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
                 return self._json(200, {"ok": True, "result": result})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "files"] and parts[4] == "similar":
-                try: result = similar_files(STORE, int(parts[3]), int(q.get("limit", ["20"])[0]), DETECTION_LIMITS.similar_max_results)
+                try: result = similar_files(STORE, int(parts[3]), int(q.get("limit", ["20"])[0]), DETECTION_LIMITS.similar_max_results, {c["id"] for c in visible_cases(STORE,self._auth_user(),AUTH_ENABLED)})
                 except KeyError: return self._json(404, {"ok": False, "error": {"code": "file_not_found", "message": "file not found"}})
                 return self._json(200, {"ok": True, "result": result})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "files"] and parts[4] == "av":
@@ -344,7 +372,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/api/v1/mail":
                 return self._json(200, {"ok": True, "result": mail_domain(self._required(q, "domain"))})
             if parsed.path == "/api/v1/cases":
-                return self._json(200, {"ok": True, "result": STORE.list_cases()})
+                return self._json(200, {"ok": True, "result": visible_cases(STORE,self._auth_user(),AUTH_ENABLED)})
             if len(parts) == 4 and parts[:3] == ["api", "v1", "cases"]:
                 case = STORE.get_case(int(parts[3]))
                 return self._json(200, {"ok": True, "result": case}) if case else self._json(404, {"ok": False, "error": "case not found"})
@@ -360,6 +388,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._ui_error(500, "request failed")
             return self._json(502, {"ok": False, "error": {"code": "request_failed", "message": "request failed"}})
 
+    @scoped
     def do_POST(self):
         _, parts = self._parts()
         try:
@@ -405,7 +434,7 @@ class Handler(BaseHTTPRequestHandler):
                 if parts == ["ui", "cases"]:
                     body = self._form(); name = body.get("name", "").strip()
                     if not name: raise ValueError("name is required")
-                    case = STORE.create_case(name, body.get("description", ""))
+                    case = STORE.create_case(name, body.get("description", ""), owner_user_id=self._auth_user()["id"] or None)
                     return self._redirect(f"/cases/{case['id']}")
                 if len(parts) == 4 and parts[:2] == ["ui", "cases"] and parts[3] == "targets":
                     body = self._form(); case_id = int(parts[2]); detected = detect_target(body.get("value", ""))
@@ -439,13 +468,13 @@ class Handler(BaseHTTPRequestHandler):
                 if length <= 0 or length > 64 * 1024 * 1024:
                     raise ValueError("invalid bundle size")
                 raw = self.rfile.read(length)
-                result=import_bundle(STORE, FILE_STORE, raw); STORE.add_audit("case_import","success",self._auth_user().get("id") or None,self._auth_user().get("username")); return self._json(201, {"ok": True, "result": result})
+                result=import_bundle(STORE, FILE_STORE, raw, owner_user_id=u["id"] or None); STORE.add_audit("case_import","success",self._auth_user().get("id") or None,self._auth_user().get("username")); return self._json(201, {"ok": True, "result": result})
             if parts == ["api", "v1", "cases", "import", "stix"]:
                 length = int(self.headers.get("Content-Length", "0"))
                 if length <= 0 or length > 16 * 1024 * 1024: raise ValueError("invalid STIX bundle size")
-                result=import_stix(STORE, self.rfile.read(length)); STORE.add_audit("stix_import","success",self._auth_user().get("id") or None,self._auth_user().get("username")); return self._json(201, {"ok": True, "result": result})
+                result=import_stix(STORE, self.rfile.read(length), owner_user_id=u["id"] or None); STORE.add_audit("stix_import","success",self._auth_user().get("id") or None,self._auth_user().get("username")); return self._json(201, {"ok": True, "result": result})
             if parts == ["api", "v1", "cases", "import", "misp"]:
-                result=import_event(STORE, self._body(4 * 1024 * 1024)); STORE.add_audit("misp_import","success",self._auth_user().get("id") or None,self._auth_user().get("username")); return self._json(201, {"ok": True, "result": result})
+                result=import_event(STORE, self._body(4 * 1024 * 1024), owner_user_id=u["id"] or None); STORE.add_audit("misp_import","success",self._auth_user().get("id") or None,self._auth_user().get("username")); return self._json(201, {"ok": True, "result": result})
             if len(parts) == 7 and parts[:4] == ["api", "v1", "intelligence", "sources"] and parts[5] in {"taxii", "misp"} and parts[6] in {"preview", "import"}:
                 source=INTELLIGENCE_SOURCES.get(parts[4])
                 if source is None: raise SourceError("source_not_found", "source not found", 404)
@@ -453,7 +482,7 @@ class Handler(BaseHTTPRequestHandler):
                 doc=taxii_objects(source, body.get("collection", ""), body.get("limit", 100)) if parts[5] == "taxii" else misp_event(source, str(body.get("event", "")))
                 if parts[6] == "preview": return self._json(200, {"ok": True, "result": {"source": source.name, "kind": source.kind, "objects": len(doc.get("objects", [])) if isinstance(doc, dict) else 0, "lossy": True}})
                 provenance={"transport":source.kind,"source":source.name,"source_hostname":source.hostname,"collection":body.get("collection")} if source.kind == "taxii" else {"source_format":"MISP","source":source.name,"source_hostname":source.hostname,"event":body.get("event")}
-                result = import_stix(STORE, json.dumps(doc).encode(), provenance) if source.kind == "taxii" else import_event(STORE, doc, provenance)
+                result = import_stix(STORE, json.dumps(doc).encode(), provenance, owner_user_id=u["id"] or None) if source.kind == "taxii" else import_event(STORE, doc, provenance, owner_user_id=u["id"] or None)
                 STORE.add_audit(f"{source.kind}_import","success",u.get("id") or None,u.get("username"))
                 return self._json(201, {"ok": True, "result": result})
             if len(parts) == 6 and parts[:4] == ["api", "v1", "intelligence", "sources"] and parts[5] in {"preview", "import"}:
@@ -463,7 +492,7 @@ class Handler(BaseHTTPRequestHandler):
                 doc = taxii_objects(source, body.get("collection", ""), body.get("limit", 100)) if source.kind == "taxii" else misp_event(source, str(body.get("event", "")))
                 if parts[5] == "preview": return self._json(200, {"ok": True, "result": {"source": source.name, "kind": source.kind, "objects": len(doc.get("objects", [])) if isinstance(doc, dict) else 0, "lossy": True}})
                 provenance={"transport":source.kind,"source":source.name,"source_hostname":source.hostname,"collection":body.get("collection")} if source.kind == "taxii" else {"source_format":"MISP","source":source.name,"source_hostname":source.hostname,"event":body.get("event")}
-                result = import_stix(STORE, json.dumps(doc).encode(), provenance) if source.kind == "taxii" else import_event(STORE, doc, provenance)
+                result = import_stix(STORE, json.dumps(doc).encode(), provenance, owner_user_id=u["id"] or None) if source.kind == "taxii" else import_event(STORE, doc, provenance, owner_user_id=u["id"] or None)
                 STORE.add_audit(f"{source.kind}_import","success",u.get("id") or None,u.get("username"))
                 return self._json(201, {"ok": True, "result": result})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "files":
@@ -507,7 +536,7 @@ class Handler(BaseHTTPRequestHandler):
                 name = str(body.get("name", "")).strip()
                 if not name:
                     raise ValueError("name is required")
-                result = STORE.create_case(name, str(body.get("description", "")), str(body.get("status", "open")))
+                result = STORE.create_case(name, str(body.get("description", "")), str(body.get("status", "open")), owner_user_id=u["id"] or None)
                 return self._json(201, {"ok": True, "result": result})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "cases"] and parts[4] == "targets":
                 case_id = int(parts[3])
@@ -525,10 +554,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"ok": True, "result": result})
             if len(parts) == 7 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "providers":
                 result = execute_provider(STORE, PROVIDERS, int(parts[3]), parts[5], parts[6])
+                STORE.add_audit("provider_enrichment","success",u.get("id") or None,u.get("username"),"target",parts[3])
                 return self._json(201, {"ok": True, "result": result})
             if len(parts) == 5 and parts[:3] == ["api", "v1", "targets"] and parts[4] == "enrich":
                 result=enrich_target(STORE, PROVIDERS, int(parts[3])); u=self._auth_user(); STORE.add_audit("provider_enrichment","success",u.get("id") or None,u.get("username"),"target",parts[3]); return self._json(200, {"ok": True, "result": result})
             return self._json(404, {"ok": False, "error": "not found"})
+        except AccessError:
+            raise
         except ProviderError as exc:
             return self._provider_error(exc)
         except SourceError as exc:
@@ -548,6 +580,7 @@ class Handler(BaseHTTPRequestHandler):
             if parts and parts[0] == "ui": return self._ui_error(500, "request failed")
             return self._json(502, {"ok": False, "error": {"code": "request_failed", "message": "request failed"}})
 
+    @scoped
     def do_PATCH(self):
         _, parts = self._parts()
         try:
@@ -563,6 +596,7 @@ class Handler(BaseHTTPRequestHandler):
             target=STORE.get_user(int(parts[4]));
             if target is None:return self._json(404,{"ok":False,"error":"user not found"})
             b=self._body(64*1024); changes={k:b[k] for k in ("display_name","role","enabled") if k in b}
+            if "enabled" in changes and type(changes["enabled"]) is not bool: raise ValueError("enabled must be boolean")
             if "role" in changes and changes["role"] not in {"admin","analyst","viewer"}: raise ValueError("invalid role")
             if (changes.get("enabled") is False or changes.get("role") not in (None,"admin")) and target["role"]=="admin" and target["enabled"]:
                 admins=[x for x in STORE.list_users() if x["role"]=="admin" and x["enabled"] and x["id"]!=target["id"]]
@@ -572,6 +606,7 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, KeyError, json.JSONDecodeError) as exc:
             return self._json(400,{"ok":False,"error":str(exc)})
 
+    @scoped
     def do_DELETE(self):
         _, parts = self._parts()
         u=self._require_auth("admin")
@@ -579,7 +614,7 @@ class Handler(BaseHTTPRequestHandler):
         if AUTH_ENABLED and not self._csrf_ok(u): return self._json(403,{"ok":False,"error":{"code":"csrf_required","message":"CSRF token required"}})
         if len(parts) == 4 and parts[:3] == ["api", "v1", "cases"]:
             ok=STORE.delete_case(int(parts[3]));
-            if ok: STORE.add_audit("case_delete","success",u.get("id"),u.get("username"),"case",parts[3])
+            if ok: STORE.add_audit("case_delete","success",u.get("id") or None,u.get("username"),"case",parts[3])
             return self._json(200, {"ok": True}) if ok else self._json(404, {"ok": False, "error": "case not found"})
         return self._json(404, {"ok": False, "error": "not found"})
 

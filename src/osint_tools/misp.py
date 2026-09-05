@@ -17,10 +17,10 @@ def export_event(store,case_id):
         for alg,key in (('md5','md5'),('sha1','sha1'),('sha256','sha256')): attrs.append({'uuid':_uuid(alg,f'{case_id}:{f["sha256"]}:{alg}'),'type':alg,'value':f[key],'category':'Payload delivery','to_ids':False,'comment':'OSINT Tools file hash'})
     return {'Event':{'uuid':_uuid('event',str(case_id)),'info':str(c['name'])[:255],'date':str(c['created_at'])[:10],'timestamp':c['created_at'],'published':False,'threat_level_id':'1','analysis':0,'distribution':0,'Attribute':attrs,'Tag':[]}}
 
-def import_event(store,doc, provenance=None):
+def import_event(store,doc, provenance=None, *, owner_user_id=None):
     e=doc.get('Event') if isinstance(doc,dict) else None
     if not isinstance(e,dict): raise ValueError('invalid MISP event')
-    c=store.create_case(str(e.get('info') or 'Imported MISP event')[:200])
+    c=store.create_case(str(e.get('info') or 'Imported MISP event')[:200], owner_user_id=owner_user_id)
     counts={}; skipped=0
     for a in e.get('Attribute',[])[:1000]:
         typ,val=str(a.get('type','')),a.get('value')

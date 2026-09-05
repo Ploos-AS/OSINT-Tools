@@ -53,6 +53,9 @@ print(value)
 PY
 }
 
+# Prefer this checkout's environment after repository relocation.
+if [ -x .venv/bin/python ]; then PATH="$PWD/.venv/bin:$PATH"; export PATH; fi
+PYTHONPATH="$PWD/src:$PWD${PYTHONPATH:+:$PYTHONPATH}"; export PYTHONPATH
 run_gate "Python tests" python -m pytest -v
 run_gate "git diff --check" git diff --check
 
@@ -152,11 +155,11 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.6.0" and i["milestone"] == "M6.0" and i["max_upload_bytes"] == 16384
+assert i["version"] == "0.6.1" and i["milestone"] == "M6.1" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
-    [ "$api_ok" -eq 1 ] && record "M6.0 runtime version" PASS "API reports 0.6.0/M6.0" || record "M6.0 runtime version" FAIL "runtime version check failed"
+    [ "$api_ok" -eq 1 ] && record "M6.1 runtime version" PASS "API reports 0.6.1/M6.1" || record "M6.1 runtime version" FAIL "runtime version check failed"
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
     case_code=$(curl -sS -o "$tmp_dir/case.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases" || true)
     [ "$case_code" = 201 ] || api_ok=0
@@ -568,7 +571,7 @@ else
     record "M4.4 detection runtime" SKIPPED "Docker runtime was not available"
     record "AV disabled behavior" SKIPPED "Docker runtime was not available"
     record "persistence" SKIPPED "Docker runtime was not available"
-    record "M6.0 runtime version" SKIPPED "Docker runtime was not available"
+    record "M6.1 runtime version" SKIPPED "Docker runtime was not available"
     record "M6.0 bootstrap/admin runtime" SKIPPED "Docker runtime was not available"
     record "M6.0 login runtime" SKIPPED "Docker runtime was not available"
     record "M6.0 anonymous rejection runtime" SKIPPED "Docker runtime was not available"
@@ -627,25 +630,41 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
         m60_results=$(mktemp)
         if python scripts/qualification_m60_runtime.py "http://127.0.0.1:$m60_port" >"$m60_results"; then :; else record "M6.0 authenticated Docker block" FAIL "one or more black-box HTTP assertions failed"; fi
         while IFS='|' read -r gate status detail; do [ -n "$gate" ] && record "$gate" "$status" "$detail"; done <"$m60_results"
+        m61_results=$(mktemp)
+        if python scripts/qualification_m61_runtime.py "http://127.0.0.1:$m60_port" >"$m61_results"; then :; else record "M6.1 authenticated Docker block" FAIL "M6.1 HTTP assertions failed"; fi
+        while IFS='|' read -r gate status detail; do [ -n "$gate" ] && record "$gate" "$status" "$detail"; done <"$m61_results"
         docker compose -p "$m60_project" restart osint-tools >/dev/null 2>&1 || true
         i=0; while [ "$i" -lt 30 ]; do curl -fsS "http://127.0.0.1:$m60_port/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done
         : >"$m60_results"
         if python scripts/qualification_m60_runtime.py "http://127.0.0.1:$m60_port" persistence >"$m60_results"; then :; else record "M6.0 persistence restart" FAIL "authenticated state did not survive restart"; fi
         while IFS='|' read -r gate status detail; do [ -n "$gate" ] && record "$gate" "$status" "$detail"; done <"$m60_results"
-        rm -f "$m60_results"
+        if python scripts/qualification_m61_runtime.py "http://127.0.0.1:$m60_port" persistence >"$m61_results"; then :; else record "M6.1 persistence restart" FAIL "ACL/team state did not survive restart"; fi
+        while IFS='|' read -r gate status detail; do [ -n "$gate" ] && record "$gate" "$status" "$detail"; done <"$m61_results"
+        rm -f "$m61_results" "$m60_results"
     else
         record "M6.0 authenticated Docker block" FAIL "isolated authenticated Compose runtime did not start"
+        record "M6.1 authenticated Docker block" FAIL "required isolated runtime did not start"
     fi
     docker compose -p "$m60_project" --profile av down -v >/dev/null 2>&1 || true
     kill "$m60_fixture_pid" 2>/dev/null || true
 else
     record "M6.0 authenticated Docker block" SKIPPED "Docker daemon is unavailable"
+    record "M6.1 authenticated Docker block" SKIPPED "Docker daemon is unavailable"
 fi
 unset OSINT_TOOLS_AUTH_ENABLED OSINT_TOOLS_CLAMAV_ENABLED OSINT_TAXII_ENABLED OSINT_TAXII_URL OSINT_TAXII_TOKEN OSINT_MISP_ENABLED OSINT_MISP_URL OSINT_MISP_API_KEY
 
 # Auth-disabled behavior was exercised by the complete legacy runtime above.
 [ "$docker_ready" -eq 1 ] && record "M6.0 auth-disabled compatibility" PASS "info and M2-M5.5 anonymous workflow verified" || record "M6.0 auth-disabled compatibility" SKIPPED "Docker runtime was unavailable"
-record "M6.0 schema 7->8 runtime migration" SKIPPED "no deterministic schema-7 container fixture is currently available; Python migration coverage retained"
+if [ "$docker_ready" -eq 1 ]; then
+    migration_results=$(mktemp)
+    if python scripts/qualification_m61_migration_runtime.py >"$migration_results"; then :; else record "M6.1 migration Docker block" FAIL "schema-8 startup qualification failed"; fi
+    while IFS='|' read -r gate status detail; do [ -n "$gate" ] && record "$gate" "$status" "$detail"; done <"$migration_results"
+    rm -f "$migration_results"
+    record "M6.1 auth-disabled compatibility" PASS "complete legacy HTTP workflow ran with authentication disabled"
+else
+    record "M6.1 schema 8 runtime migration" SKIPPED "Docker runtime is unavailable"
+    record "M6.1 auth-disabled compatibility" SKIPPED "Docker runtime is unavailable"
+fi
 
 av_project="osint-tools-av-qualify-$$"
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
@@ -742,7 +761,7 @@ PY
             record "M4.5 local AV boundary" SKIPPED "clamd was not ready"
         fi
     else
-        record "ClamAV readiness" SKIPPED "optional ClamAV Compose profile could not be started"
+        record "ClamAV readiness" FAIL "required real ClamAV Compose profile could not be started"
         record "ClamAV clean scan" SKIPPED "optional ClamAV profile unavailable"
         record "ClamAV EICAR detection" SKIPPED "optional ClamAV profile unavailable"
         record "ClamAV detection provenance" SKIPPED "optional ClamAV profile unavailable"
@@ -819,9 +838,26 @@ if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
         record "Podman parser imports" SKIPPED "Podman image did not build"
         record "Podman ClamAV runtime" SKIPPED "Podman image did not build"
     fi
-    podman rm -f "$podman_name" >/dev/null 2>&1 || true
+    podman_auth_name="${podman_name}-auth"
+    if podman run -d --name "$podman_auth_name" -e OSINT_TOOLS_AUTH_ENABLED=true -p 127.0.0.1::8080 "$podman_name" >/dev/null; then
+        auth_port=$(podman port "$podman_auth_name" 8080/tcp | sed 's/.*://')
+        i=0; while [ "$i" -lt 30 ]; do curl -fsS "http://127.0.0.1:$auth_port/healthz" >/dev/null 2>&1 && break; i=$((i+1)); sleep 1; done
+        podman_auth_results=$(mktemp)
+        if python scripts/qualification_m61_runtime.py "http://127.0.0.1:$auth_port" smoke >"$podman_auth_results"; then
+            record "Podman auth/ownership/ACL smoke" PASS "actual authenticated cross-user HTTP checks"
+        else
+            record "Podman auth/ownership/ACL smoke" FAIL "authenticated HTTP assertions failed"
+            cat "$podman_auth_results" >&2
+        fi
+        rm -f "$podman_auth_results"
+    else
+        record "Podman auth/ownership/ACL smoke" FAIL "authenticated container did not start"
+    fi
+    podman rm -f -v "$podman_auth_name" >/dev/null 2>&1 || true
+    podman rm -f -v "$podman_name" >/dev/null 2>&1 || true
     podman rmi "$podman_name" >/dev/null 2>&1 || true
 else
+    record "Podman auth/ownership/ACL smoke" SKIPPED "Podman is unavailable"
     record "Podman build" SKIPPED "Podman is unavailable"
     record "Podman runtime/non-root" SKIPPED "Podman is unavailable"
     record "Podman /data write" SKIPPED "Podman is unavailable"

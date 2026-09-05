@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def utcnow() -> str:
@@ -255,6 +255,30 @@ class Store:
                 CREATE INDEX IF NOT EXISTS idx_audit_events_time ON audit_events(id DESC);
                 """
             )
+            if "owner_user_id" not in {r[1] for r in conn.execute("PRAGMA table_info(cases)")}:
+                conn.execute("ALTER TABLE cases ADD COLUMN owner_user_id INTEGER REFERENCES users(id)")
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS teams (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+                    description TEXT NOT NULL DEFAULT '',
+                    enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS team_members (
+                    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL, PRIMARY KEY(team_id,user_id));
+                CREATE TABLE IF NOT EXISTS case_acl (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    case_id INTEGER NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    team_id INTEGER REFERENCES teams(id) ON DELETE CASCADE,
+                    access TEXT NOT NULL CHECK(access IN ('editor','viewer')),
+                    CHECK((user_id IS NOT NULL) != (team_id IS NOT NULL)),
+                    UNIQUE(case_id,user_id), UNIQUE(case_id,team_id));
+                CREATE INDEX IF NOT EXISTS idx_team_members_user ON team_members(user_id);
+                CREATE INDEX IF NOT EXISTS idx_cases_owner ON cases(owner_user_id);
+            """)
             relationship_columns = {row[1] for row in conn.execute("PRAGMA table_info(relationships)")}
             if "artifact_id" not in relationship_columns:
                 conn.execute("ALTER TABLE relationships ADD COLUMN artifact_id INTEGER REFERENCES artifacts(id) ON DELETE SET NULL")
@@ -267,13 +291,18 @@ class Store:
     def _row(row: sqlite3.Row | None) -> dict[str, Any] | None:
         return dict(row) if row is not None else None
 
-    def create_case(self, name: str, description: str = "", status: str = "open") -> dict[str, Any]:
+    def create_case(self, name: str, description: str = "", status: str = "open", *, owner_user_id: int | None = None) -> dict[str, Any]:
         now = utcnow()
         with self.connect() as conn:
+            if owner_user_id is not None:
+                from .case_access import validate_owner
+                validate_owner(conn, owner_user_id)
             cur = conn.execute(
-                "INSERT INTO cases(name, description, status, created_at, updated_at) VALUES(?,?,?,?,?)",
-                (name.strip(), description, status, now, now),
+                "INSERT INTO cases(name, description, status, created_at, updated_at, owner_user_id) VALUES(?,?,?,?,?,?)",
+                (name.strip(), description, status, now, now, owner_user_id),
             )
+            from .case_access import audit
+            audit(conn, "case_created", owner_user_id, {"case_id": cur.lastrowid, "owner_user_id": owner_user_id})
             row = conn.execute("SELECT * FROM cases WHERE id=?", (cur.lastrowid,)).fetchone()
         return dict(row)
 
@@ -467,6 +496,10 @@ class Store:
     def add_note(self, case_id: int, body: str, target_id: int | None = None, artifact_id: int | None = None) -> dict[str, Any]:
         now = utcnow()
         with self.connect() as conn:
+            for table, oid in (("targets",target_id),("artifacts",artifact_id)):
+                if oid is not None and not conn.execute(f"SELECT 1 FROM {table} WHERE id=? AND case_id=?",(oid,case_id)).fetchone():
+                    from .case_access import AccessError
+                    raise AccessError(404,"not found")
             cur = conn.execute(
                 "INSERT INTO notes(case_id,target_id,artifact_id,body,created_at,updated_at) VALUES(?,?,?,?,?,?)",
                 (case_id, target_id, artifact_id, body, now, now),
