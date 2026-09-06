@@ -94,6 +94,23 @@ def restore(target: Path, backup_root: Path) -> None:
     )
 
 
+def clear_container_owned_data(target: Path) -> None:
+    """Remove bind-mounted content as root before host TemporaryDirectory cleanup."""
+    docker(
+        "run",
+        "--rm",
+        "--user",
+        "0",
+        "--entrypoint",
+        "sh",
+        "-v",
+        f"{target}:/data",
+        "osint-tools:dev",
+        "-c",
+        "rm -rf /data/* /data/.[!.]* /data/..?*",
+    )
+
+
 def verify_schema(data: Path) -> None:
     with sqlite3.connect(data / "osint-tools.db") as conn:
         version = conn.execute(
@@ -122,94 +139,111 @@ def main() -> int:
                 directory.mkdir()
                 directory.chmod(0o777)
 
-            base = start(name, source)
-            admin = Client(base)
-            admin.ok(
-                "POST",
-                "/api/v1/auth/bootstrap",
-                {"username": "m72admin", "password": PASSWORD},
-                201,
-            )
-            admin.login("m72admin", PASSWORD)
-            analyst_id = admin.ok(
-                "POST",
-                "/api/v1/admin/users",
-                {"username": "m72analyst", "password": PASSWORD, "role": "analyst"},
-                201,
-            )["id"]
-            analyst = Client(base).login("m72analyst", PASSWORD)
+            try:
+                base = start(name, source)
+                admin = Client(base)
+                admin.ok(
+                    "POST",
+                    "/api/v1/auth/bootstrap",
+                    {"username": "m72admin", "password": PASSWORD},
+                    201,
+                )
+                admin.login("m72admin", PASSWORD)
+                analyst_id = admin.ok(
+                    "POST",
+                    "/api/v1/admin/users",
+                    {"username": "m72analyst", "password": PASSWORD, "role": "analyst"},
+                    201,
+                )["id"]
+                analyst = Client(base).login("m72analyst", PASSWORD)
 
-            team = admin.ok(
-                "POST",
-                "/api/v1/admin/teams",
-                {"name": "M7.2 restore team", "description": "backup sentinel"},
-                201,
-            )
-            team_path = f"/api/v1/admin/teams/{team['id']}"
-            admin.ok("POST", team_path + "/members", {"user_id": analyst_id}, 201)
+                team = admin.ok(
+                    "POST",
+                    "/api/v1/admin/teams",
+                    {"name": "M7.2 restore team", "description": "backup sentinel"},
+                    201,
+                )
+                team_path = f"/api/v1/admin/teams/{team['id']}"
+                admin.ok("POST", team_path + "/members", {"user_id": analyst_id}, 201)
 
-            case = admin.ok(
-                "POST",
-                "/api/v1/cases",
-                {"name": "M7.2 backup restore case", "description": "must survive"},
-                201,
-            )
-            case_path = f"/api/v1/cases/{case['id']}"
-            admin.ok(
-                "POST",
-                case_path + "/acl",
-                {
-                    "principal_type": "team",
-                    "principal_id": team["id"],
-                    "access": "editor",
-                },
-                201,
-            )
-            admin.ok("POST", case_path + "/notes", {"body": "persistent note"}, 201)
-            file_row = admin.ok("POST", case_path + "/files", PAYLOAD, 201)
-            file_id = file_row["id"]
-            assert analyst.ok("GET", case_path + "/access")["effective_access"] == "editor"
-            assert analyst.ok("GET", f"/api/v1/files/{file_id}")["id"] == file_id
-            before_info = admin.ok("GET", "/api/v1/info")
+                case = admin.ok(
+                    "POST",
+                    "/api/v1/cases",
+                    {"name": "M7.2 backup restore case", "description": "must survive"},
+                    201,
+                )
+                case_path = f"/api/v1/cases/{case['id']}"
+                admin.ok(
+                    "POST",
+                    case_path + "/acl",
+                    {
+                        "principal_type": "team",
+                        "principal_id": team["id"],
+                        "access": "editor",
+                    },
+                    201,
+                )
+                admin.ok("POST", case_path + "/notes", {"body": "persistent note"}, 201)
+                file_row = admin.ok("POST", case_path + "/files", PAYLOAD, 201)
+                file_id = file_row["id"]
+                assert analyst.ok("GET", case_path + "/access")["effective_access"] == "editor"
+                assert analyst.ok("GET", f"/api/v1/files/{file_id}")["id"] == file_id
+                before_info = admin.ok("GET", "/api/v1/info")
 
-            docker("stop", name)
-            verify_schema(source)
-            archive(source, backup_root)
-            docker("rm", name)
+                docker("stop", name)
+                verify_schema(source)
+                archive(source, backup_root)
+                docker("rm", name)
 
-            # Restore into a new empty persistent root; the source is deliberately
-            # left unused so successful verification cannot read the original data.
-            restore(restored, backup_root)
-            verify_schema(restored)
-            expected_hash = hashlib.sha256(PAYLOAD).hexdigest()
-            blobs = [p for p in (restored / "files").rglob("*") if p.is_file()]
-            assert any(
-                hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash for path in blobs
-            ), "restored uploaded bytes are missing"
+                # Restore into a new empty persistent root; the source is deliberately
+                # left unused so successful verification cannot read the original data.
+                restore(restored, backup_root)
+                verify_schema(restored)
+                expected_hash = hashlib.sha256(PAYLOAD).hexdigest()
+                blobs = [p for p in (restored / "files").rglob("*") if p.is_file()]
+                assert any(
+                    hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash for path in blobs
+                ), "restored uploaded bytes are missing"
 
-            base = start(name, restored)
-            admin = Client(base).login("m72admin", PASSWORD)
-            analyst = Client(base).login("m72analyst", PASSWORD)
-            after_info = admin.ok("GET", "/api/v1/info")
-            assert after_info["version"] == before_info["version"]
-            assert after_info.get("milestone") == before_info.get("milestone")
+                base = start(name, restored)
+                admin = Client(base).login("m72admin", PASSWORD)
+                analyst = Client(base).login("m72analyst", PASSWORD)
+                after_info = admin.ok("GET", "/api/v1/info")
+                assert after_info["version"] == before_info["version"]
+                assert after_info.get("milestone") == before_info.get("milestone")
 
-            restored_case = admin.ok("GET", case_path)
-            assert restored_case["name"] == "M7.2 backup restore case"
-            assert any(note["body"] == "persistent note" for note in restored_case["notes"])
-            assert analyst.ok("GET", case_path + "/access")["effective_access"] == "editor"
-            assert analyst.ok("GET", f"/api/v1/files/{file_id}")["id"] == file_id
-            assert any(t["name"] == "M7.2 restore team" for t in admin.ok("GET", "/api/v1/admin/teams"))
+                restored_case = admin.ok("GET", case_path)
+                assert restored_case["name"] == "M7.2 backup restore case"
+                assert any(note["body"] == "persistent note" for note in restored_case["notes"])
+                assert analyst.ok("GET", case_path + "/access")["effective_access"] == "editor"
+                assert analyst.ok("GET", f"/api/v1/files/{file_id}")["id"] == file_id
+                assert any(
+                    t["name"] == "M7.2 restore team"
+                    for t in admin.ok("GET", "/api/v1/admin/teams")
+                )
 
-            docker("restart", name)
-            base = wait_ready(name)
-            analyst = Client(base).login("m72analyst", PASSWORD)
-            assert analyst.ok("GET", case_path + "/access")["effective_access"] == "editor"
-            assert analyst.ok("GET", f"/api/v1/files/{file_id}")["id"] == file_id
+                docker("restart", name)
+                base = wait_ready(name)
+                analyst = Client(base).login("m72analyst", PASSWORD)
+                assert analyst.ok("GET", case_path + "/access")["effective_access"] == "editor"
+                assert analyst.ok("GET", f"/api/v1/files/{file_id}")["id"] == file_id
 
-            print(
-                "M7.2 backup/restore/upgrade|PASS|schema8 upgrade, stopped full-/data archive, clean restore, users/team/ACL/case/note/upload bytes and restart verified"
-            )
+                print(
+                    "M7.2 backup/restore/upgrade|PASS|schema8 upgrade, stopped full-/data archive, clean restore, users/team/ACL/case/note/upload bytes and restart verified"
+                )
+            finally:
+                # The application image runs as UID 10001, and root extraction preserves
+                # container ownership. Clean bind-mounted trees from a root helper so
+                # host-side TemporaryDirectory cleanup cannot mask the actual gate result.
+                try:
+                    docker("rm", "-f", name)
+                except Exception:
+                    pass
+                for directory in (source, restored):
+                    try:
+                        clear_container_owned_data(directory)
+                    except Exception:
+                        pass
         return 0
     except Exception as exc:
         print(f"M7.2 backup/restore/upgrade|FAIL|{type(exc).__name__}: {str(exc)[:300]}")
