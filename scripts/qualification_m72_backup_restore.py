@@ -90,10 +90,11 @@ def restore(target: Path, backup_root: Path) -> None:
         f"{backup_root}:/backup:ro",
         "osint-tools:dev",
         "-c",
-        # tar intentionally preserves the application UID/GID. Add only host-runner
-        # read/traverse bits after extraction so qualification can inspect the restored
-        # tree without changing ownership or the app user's write permissions.
-        "tar -C /data -xzf /backup/osint-tools-data.tgz && chmod -R a+rX /data",
+        # A host bind mount may give the restore root host-runner ownership even when
+        # archive members preserve UID/GID. Normalize the complete restored boundary
+        # to the image's non-root application identity, then retain host qualification
+        # read/traverse access without granting write access to other users.
+        "tar -C /data -xzf /backup/osint-tools-data.tgz && chown -R 10001:10001 /data && chmod -R a+rX /data",
     )
 
 
@@ -235,9 +236,9 @@ def main() -> int:
                     "M7.2 backup/restore/upgrade|PASS|schema8 upgrade, stopped full-/data archive, clean restore, users/team/ACL/case/note/upload bytes and restart verified"
                 )
             finally:
-                # The application image runs as UID 10001, and root extraction preserves
-                # container ownership. Clean bind-mounted trees from a root helper so
-                # host-side TemporaryDirectory cleanup cannot mask the actual gate result.
+                # The application image runs as UID 10001. Clean bind-mounted trees
+                # from a root helper so host-side TemporaryDirectory cleanup cannot
+                # mask the actual gate result.
                 try:
                     docker("rm", "-f", name)
                 except Exception:
