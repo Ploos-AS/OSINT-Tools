@@ -17,7 +17,7 @@ concurrency:
 
 env:
   IMAGE_GHCR: ghcr.io/ploos-as/osint-tools
-  IMAGE_DOCKERHUB: ploosas/osint-tools
+  IMAGE_DOCKERHUB: ploos1/osint-tools
 
 jobs:
   qualification:

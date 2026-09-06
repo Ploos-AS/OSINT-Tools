@@ -16,7 +16,7 @@ A mirror is not canonical merely because CI runs there. Release metadata records
 A release publishes one multi-platform build from the tagged source to both registries:
 
 - GHCR: `ghcr.io/ploos-as/osint-tools`
-- Docker Hub: `ploosas/osint-tools`
+- Docker Hub: `ploos1/osint-tools`
 
 Supported release platforms are `linux/amd64` and `linux/arm64`. The immutable full-version tag is authoritative. Moving compatibility tags are also published: `MAJOR.MINOR`, `MAJOR`, and `latest`.
 
@@ -24,7 +24,7 @@ Example after v1.0.0 exists:
 
 ```sh
 docker pull ghcr.io/ploos-as/osint-tools:1.0.0
-docker pull ploosas/osint-tools:1.0.0
+docker pull ploos1/osint-tools:1.0.0
 ```
 
 The release workflow requires the GHCR and Docker Hub full-version references to resolve to the same manifest digest and to contain both supported platforms.

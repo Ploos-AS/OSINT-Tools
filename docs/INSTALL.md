@@ -22,7 +22,7 @@ OSINT_TOOLS_IMAGE=ghcr.io/ploos-as/osint-tools:1.0.0 docker compose up -d
 Docker Hub is an equivalent publication target:
 
 ```sh
-OSINT_TOOLS_IMAGE=ploosas/osint-tools:1.0.0 docker compose up -d
+OSINT_TOOLS_IMAGE=ploos1/osint-tools:1.0.0 docker compose up -d
 ```
 
 Persistent application state is stored in the named volume `osint-tools-data` mounted at `/data`. Authentication is enabled by default. Do not expose an authentication-disabled deployment to an untrusted network.

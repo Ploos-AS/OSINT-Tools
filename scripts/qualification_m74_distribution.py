@@ -21,8 +21,8 @@ def main() -> int:
         require(quadlet, "Image=ghcr.io/ploos-as/osint-tools:latest", "Volume=osint-tools-data.volume:/data:Z", "NoNewPrivileges=true")
         assert "localhost/osint-tools:dev" not in quadlet
 
-        require(install, "ghcr.io/ploos-as/osint-tools:1.0.0", "ploosas/osint-tools:1.0.0", "immutable", "/data")
-        require(distribution, "Forgejo", "GitHub", "Codeberg", "ghcr.io/ploos-as/osint-tools", "ploosas/osint-tools", "Harbor", "linux/amd64", "linux/arm64")
+        require(install, "ghcr.io/ploos-as/osint-tools:1.0.0", "ploos1/osint-tools:1.0.0", "immutable", "/data")
+        require(distribution, "Forgejo", "GitHub", "Codeberg", "ghcr.io/ploos-as/osint-tools", "ploos1/osint-tools", "Harbor", "linux/amd64", "linux/arm64")
 
         print("M7.4 distribution/docs|PASS|published-image Compose/Quadlet contract, immutable-tag guidance and Forgejo/GitHub/Codeberg + GHCR/Docker Hub model verified")
         return 0
