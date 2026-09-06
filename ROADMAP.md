@@ -19,5 +19,5 @@
 - **M6.0 Authentication/RBAC/Audit — complete:** local users, secure sessions, instance-wide roles and bounded security audit events.
 - **M6.1 Case Ownership, ACLs & Teams — complete:** schema 9, explicit legacy adoption, user/team case grants, centralized role intersection, cross-user runtime qualification, migration/restart verification and documented security residuals.
 - **M6.2 Security Hardening — complete:** deterministic authorization-race coverage, real-browser security-flow qualification, centralized authorization regression review and documented residual risks.
-- **M7 Release Engineering & Polish:** installation/upgrade guidance, migration and backup/restore procedures, deployment examples, packaging/distribution metadata and release-documentation cleanup.
-- **M8 v1.0 Qualification:** amd64+arm64, Docker+Podman, fresh-install+upgrade, persistence/restart, security regression and final release-artifact qualification.
+- **M7 Release Engineering & Polish — complete:** installation/upgrade guidance, backup/restore qualification, tag-driven release automation, deployment/distribution contracts and release-candidate closure.
+- **M8 v1.0 Qualification — in progress:** M8.0 defines the final fail-closed qualification plan; next is exact 1.0.0 source/runtime/API alignment, full qualification on that commit, manual mirror/registry pre-tag verification, then immutable release publication.
