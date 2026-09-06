@@ -33,8 +33,14 @@ jobs:
       - name: Install project and test dependencies
         run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
 
+      - name: Install Chromium for M6.2 browser qualification
+        run: python -m playwright install --with-deps chromium
+
       - name: Verify Docker daemon
         run: docker info
 
       - name: Run canonical qualification
         run: sh scripts/qualify.sh
+
+      - name: M6.2 browser security
+        run: sh scripts/qualification_m62_browser.sh
