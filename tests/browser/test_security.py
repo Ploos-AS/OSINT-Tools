@@ -97,8 +97,7 @@ def test_ownership_transfer_moves_owner_controls(browser: Browser) -> None:
     with owner.expect_response(lambda response: response.url == f"{BASE_URL}{action}" and response.request.method == "PATCH") as response_info:
         transfer.get_by_role("button", name="Assign owner").click()
     assert response_info.value.status == 200
-    owner.reload()
-    assert "not found" in owner.locator("body").inner_text().lower()
+    expect(owner.get_by_text("Case not found", exact=False)).to_be_visible()
     editor_ctx, editor = fresh_page(browser, "m62-editor", "m62-editor-password")
     editor.goto(url)
     expect(editor.get_by_text("Effective access: owner", exact=False)).to_be_visible()
