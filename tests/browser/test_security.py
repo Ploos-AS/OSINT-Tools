@@ -34,9 +34,9 @@ def create_case(page: Page, name: str) -> str:
 
 def grant_access(owner: Page, principal_type: str, principal_id: int, access: str) -> None:
     form = owner.locator('form[action$="/acl"]')
-    form.get_by_label("Principal").select_option(principal_type)
-    form.get_by_label("Principal ID").fill(str(principal_id))
-    form.get_by_label("Access").select_option(access)
+    form.locator('select[name="principal_type"]').select_option(principal_type)
+    form.locator('input[name="principal_id"]').fill(str(principal_id))
+    form.locator('select[name="access"]').select_option(access)
     form.get_by_role("button", name="Grant access").click()
     owner.wait_for_load_state("networkidle")
 
@@ -94,6 +94,7 @@ def test_ownership_transfer_moves_owner_controls(browser: Browser) -> None:
     transfer.get_by_label("New owner user ID").fill("3")
     transfer.get_by_role("button", name="Assign owner").click()
     owner.wait_for_load_state("networkidle")
+    owner.reload()
     assert "not found" in owner.locator("body").inner_text().lower()
     editor_ctx, editor = fresh_page(browser, "m62-editor", "m62-editor-password")
     editor.goto(url)
