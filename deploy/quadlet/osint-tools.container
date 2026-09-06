@@ -3,7 +3,7 @@ Description=OSINT Tools
 After=network-online.target
 
 [Container]
-Image=localhost/osint-tools:dev
+Image=ghcr.io/ploos-as/osint-tools:latest
 ContainerName=osint-tools
 PublishPort=8080:8080
 Volume=osint-tools-data.volume:/data:Z

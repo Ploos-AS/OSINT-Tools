@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: Containerfile
-    image: osint-tools:dev
+    image: "${OSINT_TOOLS_IMAGE:-ghcr.io/ploos-as/osint-tools:latest}"
     ports:
       - "${OSINT_TOOLS_PORT_PUBLISHED:-8090}:8080"
     volumes:
