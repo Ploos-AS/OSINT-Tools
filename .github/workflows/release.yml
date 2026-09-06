@@ -1,0 +1,217 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE_GHCR: ghcr.io/ploos-as/osint-tools
+  IMAGE_DOCKERHUB: ploosas/osint-tools
+
+jobs:
+  qualification:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate immutable SemVer tag and project version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          if [[ ! "$tag" =~ ^v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "Release tag must be vMAJOR.MINOR.PATCH: $tag" >&2
+            exit 1
+          fi
+          version="${tag#v}"
+          project_version="$(python - <<'PY'
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print(tomllib.load(f)['project']['version'])
+          PY
+          )"
+          test "$version" = "$project_version" || {
+            echo "Tag version $version != pyproject version $project_version" >&2
+            exit 1
+          }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "major=${BASH_REMATCH[1]}" >> "$GITHUB_OUTPUT"
+          echo "minor=${BASH_REMATCH[2]}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install project and test dependencies
+        run: python -m pip install --upgrade pip && python -m pip install -e '.[dev]'
+
+      - name: Install Chromium for browser qualification
+        run: python -m playwright install --with-deps chromium
+
+      - name: Verify Docker daemon
+        run: docker info
+
+      - name: Run canonical qualification
+        run: sh scripts/qualify.sh
+
+      - name: M7.2 backup restore upgrade
+        run: python scripts/qualification_m72_backup_restore.py
+
+      - name: M7.3 release contract
+        run: python scripts/qualification_m73_release.py
+
+      - name: M6.2 browser security
+        run: sh scripts/qualification_m62_browser.sh
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      major: ${{ steps.version.outputs.major }}
+      minor: ${{ steps.version.outputs.minor }}
+
+  publish:
+    needs: qualification
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out tagged source
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and publish one multi-architecture release
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          sbom: true
+          provenance: mode=max
+          labels: |
+            org.opencontainers.image.title=OSINT Tools
+            org.opencontainers.image.description=Self-hosted passive-first OSINT workbench
+            org.opencontainers.image.version=${{ needs.qualification.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          tags: |
+            ${{ env.IMAGE_GHCR }}:${{ needs.qualification.outputs.version }}
+            ${{ env.IMAGE_GHCR }}:${{ needs.qualification.outputs.major }}.${{ needs.qualification.outputs.minor }}
+            ${{ env.IMAGE_GHCR }}:${{ needs.qualification.outputs.major }}
+            ${{ env.IMAGE_GHCR }}:latest
+            ${{ env.IMAGE_DOCKERHUB }}:${{ needs.qualification.outputs.version }}
+            ${{ env.IMAGE_DOCKERHUB }}:${{ needs.qualification.outputs.major }}.${{ needs.qualification.outputs.minor }}
+            ${{ env.IMAGE_DOCKERHUB }}:${{ needs.qualification.outputs.major }}
+            ${{ env.IMAGE_DOCKERHUB }}:latest
+
+      - name: Verify published manifests and digest equality
+        id: verify
+        shell: bash
+        env:
+          VERSION: ${{ needs.qualification.outputs.version }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          ghcr="${IMAGE_GHCR}:${VERSION}"
+          dockerhub="${IMAGE_DOCKERHUB}:${VERSION}"
+          for image in "$ghcr" "$dockerhub"; do
+            inspect="$(docker buildx imagetools inspect "$image")"
+            grep -q 'Platform:.*linux/amd64' <<<"$inspect"
+            grep -q 'Platform:.*linux/arm64' <<<"$inspect"
+          done
+          ghcr_digest="$(docker buildx imagetools inspect "$ghcr" | awk '/^Digest:/ {print $2; exit}')"
+          dockerhub_digest="$(docker buildx imagetools inspect "$dockerhub" | awk '/^Digest:/ {print $2; exit}')"
+          test "$ghcr_digest" = "$EXPECTED_DIGEST"
+          test "$dockerhub_digest" = "$EXPECTED_DIGEST"
+          echo "digest=$EXPECTED_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Attest GHCR build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE_GHCR }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Generate release metadata
+        shell: bash
+        env:
+          VERSION: ${{ needs.qualification.outputs.version }}
+          DIGEST: ${{ steps.verify.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cat > release-metadata.txt <<EOF
+          tag=${GITHUB_REF_NAME}
+          version=${VERSION}
+          source_sha=${GITHUB_SHA}
+          ghcr=${IMAGE_GHCR}:${VERSION}
+          dockerhub=${IMAGE_DOCKERHUB}:${VERSION}
+          digest=${DIGEST}
+          platforms=linux/amd64,linux/arm64
+          sbom=OCI SBOM attestation generated by docker/build-push-action
+          provenance=OCI build provenance plus GitHub build provenance attestation
+          EOF
+          cat > release-notes.md <<EOF
+          # OSINT Tools ${VERSION}
+
+          Source: ${GITHUB_SHA}
+
+          OCI images:
+          - ${IMAGE_GHCR}:${VERSION}@${DIGEST}
+          - ${IMAGE_DOCKERHUB}:${VERSION}@${DIGEST}
+
+          Platforms: linux/amd64, linux/arm64.
+
+          Upgrade: stop the application, back up the complete /data state, pull this immutable release, start it, then verify /healthz and /api/v1/info. Do not downgrade a migrated data store without restoring a backup compatible with the older release.
+
+          Persistent data is /data. Provider credentials are deployment secrets and are not included in application-data backups or release artifacts. ClamAV remains optional and external to the application image.
+
+          SBOM and provenance are published as OCI attestations. Exact release metadata is attached to this release.
+          EOF
+
+      - name: Upload release metadata artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-metadata-${{ github.ref_name }}
+          path: release-metadata.txt
+          if-no-files-found: error
+
+      - name: Create GitHub release metadata
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --title "OSINT Tools ${{ needs.qualification.outputs.version }}" --notes-file release-notes.md release-metadata.txt
