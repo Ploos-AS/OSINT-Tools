@@ -92,8 +92,11 @@ def test_ownership_transfer_moves_owner_controls(browser: Browser) -> None:
     url = create_case(owner, "M62 transfer")
     transfer = owner.locator('form[action$="/owner"]')
     transfer.get_by_label("New owner user ID").fill("3")
-    transfer.get_by_role("button", name="Assign owner").click()
-    owner.wait_for_load_state("networkidle")
+    action = transfer.get_attribute("action")
+    assert action is not None
+    with owner.expect_response(lambda response: response.url == f"{BASE_URL}{action}" and response.request.method == "PATCH") as response_info:
+        transfer.get_by_role("button", name="Assign owner").click()
+    assert response_info.value.status == 200
     owner.reload()
     assert "not found" in owner.locator("body").inner_text().lower()
     editor_ctx, editor = fresh_page(browser, "m62-editor", "m62-editor-password")
