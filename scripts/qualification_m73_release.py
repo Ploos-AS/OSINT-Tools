@@ -39,7 +39,7 @@ def main() -> int:
             'sh scripts/qualification_m62_browser.sh',
             'platforms: linux/amd64,linux/arm64',
             'ghcr.io/ploos-as/osint-tools',
-            'ploosas/osint-tools',
+            'ploos1/osint-tools',
             'DOCKERHUB_USERNAME',
             'DOCKERHUB_TOKEN',
             'sbom: true',
