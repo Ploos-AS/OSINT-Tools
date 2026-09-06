@@ -90,7 +90,10 @@ def restore(target: Path, backup_root: Path) -> None:
         f"{backup_root}:/backup:ro",
         "osint-tools:dev",
         "-c",
-        "tar -C /data -xzf /backup/osint-tools-data.tgz",
+        # tar intentionally preserves the application UID/GID. Add only host-runner
+        # read/traverse bits after extraction so qualification can inspect the restored
+        # tree without changing ownership or the app user's write permissions.
+        "tar -C /data -xzf /backup/osint-tools-data.tgz && chmod -R a+rX /data",
     )
 
 
