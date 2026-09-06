@@ -40,6 +40,8 @@ jobs:
         run: docker info
 
       - name: Run canonical qualification
+        env:
+          OSINT_TOOLS_IMAGE: osint-tools:dev
         run: sh scripts/qualify.sh
 
       - name: M7.2 backup restore upgrade
