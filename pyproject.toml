@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<10",
+    "pytest-playwright>=0.7,<1",
 ]
 
 [project.scripts]
