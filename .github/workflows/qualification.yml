@@ -53,5 +53,8 @@ jobs:
       - name: M7.4 distribution and documentation
         run: python scripts/qualification_m74_distribution.py
 
+      - name: M7.5 release candidate closure
+        run: python scripts/qualification_m75_release_candidate.py
+
       - name: M6.2 browser security
         run: sh scripts/qualification_m62_browser.sh

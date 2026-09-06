@@ -2,59 +2,46 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M6.2 Security Hardening (0.6.2)** hardens the M6.1 multi-user authorization boundary with deterministic authorization-race tests and real-browser security qualification. Authentication, RBAC, per-case ownership/ACLs, teams and audit are implemented; see [M6.2 specification](docs/M6_2_SPEC.md), [security review](docs/M6_2_SECURITY_REVIEW.md) and [qualification](docs/M6_2_QUALIFICATION.md).
+**M7 Release Engineering & Polish** is now in release-candidate closure. M0-M6 functionality is implemented and M7.1-M7.4 operator docs, backup/restore qualification, release automation, and distribution/deployment contracts are in place. M7.5 closes the release-engineering path before M8 final v1.0 qualification.
 
 ## Run with Docker or Podman
 
-```sh
-docker compose up --build
-# or
-podman compose up --build
-```
-
-Open `http://localhost:8080/healthz` and `http://localhost:8080/api/v1/info`.
-
-Example:
+Published releases use the same multi-architecture OCI image for Docker and Podman. The primary registry is GHCR, with Docker Hub as the second publication target:
 
 ```sh
-curl 'http://localhost:8080/api/v1/dns?domain=example.com'
-curl 'http://localhost:8080/api/v1/tls?host=example.com'
-curl 'http://localhost:8080/api/v1/providers'
-# For an existing target:
-curl -X POST 'http://localhost:8080/api/v1/targets/1/enrich' -d '{}'
-# Binary upload; the filename is untrusted display metadata only:
-curl -X POST -H 'X-Filename: sample.bin' --data-binary '@sample.bin' \
-  'http://localhost:8080/api/v1/cases/1/files'
+docker pull ghcr.io/ploos-as/osint-tools:1.0.0
+# equivalent release image after publication:
+docker pull ploos1/osint-tools:1.0.0
 ```
 
-Optional credentials are `IPINFO_TOKEN`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, and `SHODAN_API_KEY`. Each provider can be disabled with `OSINT_PROVIDER_<PROVIDER>_ENABLED=false`. Credentials are never accepted from API clients or returned by status APIs. VirusTotal supports IP, domain, URL, and MD5/SHA-1/SHA-256 hash targets; the other providers enrich IPs.
+Before the first v1.0.0 release exists, build the current source checkout locally:
 
-Uploaded bytes are stored under `/data/files` and are never executed, unpacked, rendered, or sent to providers. The default maximum is 25 MiB and can be changed with `OSINT_TOOLS_MAX_UPLOAD_BYTES`. Explicit enrichment of the resulting SHA-256 target may query VirusTotal by hash; it never uploads the file body.
+```sh
+OSINT_TOOLS_IMAGE=osint-tools:dev docker compose build
+OSINT_TOOLS_IMAGE=osint-tools:dev docker compose up -d
+```
 
-Archive members are never unpacked into filename-derived paths. Eligible children are streamed into the same content-addressed store under shared depth/member/expanded-byte/compression-ratio limits. Structured results are returned under the existing file-analysis API. See the M4.2 specification for limit environment variables and parser boundaries.
+Open `http://localhost:8080/` for the browser workspace, `http://localhost:8080/healthz` for health, and `http://localhost:8080/api/v1/info` for runtime information.
 
-Binary candidates are metadata, not targets or evidence of runtime behavior. List them with `GET /api/v1/files/{file_id}/candidates` and explicitly promote a supported candidate with `POST /api/v1/files/{file_id}/candidates/{candidate_id}/promote`. Promotion only updates the local case graph; it performs no DNS, HTTP, provider enrichment, or file upload. Email observations remain candidates because email is not yet a normal target type.
+Persistent application data lives under `/data`. The application image runs as a non-root user. Authentication is enabled by default; `OSINT_TOOLS_AUTH_ENABLED=false` is retained only for trusted, network-restricted single-system deployments.
 
-Local detections remain evidence rather than malware verdicts. Managed rule packs and hash sets are imported as immutable named versions through `/api/v1/signatures/rulepacks` and `/api/v1/signatures/hashsets`. File evidence is available from `GET /api/v1/files/{file_id}/detections`; `GET /api/v1/files/{file_id}/similar` returns native `simhash64-v1` Hamming distances. Explicit reanalysis uses `POST /api/v1/files/{file_id}/detections/reanalyze` and never invokes providers or the network.
+Optional credentials are `IPINFO_TOKEN`, `VIRUSTOTAL_API_KEY`, `ABUSEIPDB_API_KEY`, and `SHODAN_API_KEY`. Provider credentials are server-side deployment secrets and are never accepted from API clients or returned by status APIs.
 
-ClamAV is optional and disabled by default. Enable it with `OSINT_TOOLS_CLAMAV_ENABLED=true` and the administrator-configured `OSINT_TOOLS_CLAMAV_HOST`/`PORT`; an optional Compose profile starts `clamav/clamav:1.4.3` with a separate `clamav-db` volume. Scan files explicitly with `POST /api/v1/files/{file_id}/av/scan`, inspect status at `/api/v1/av/engines`, and retrieve persisted results at `/api/v1/files/{file_id}/av`. `OSINT_TOOLS_AV_SCAN_ON_UPLOAD=true` enables only a top-level local scan; archive children are never multiplied into automatic AV requests. ClamAV receives streamed bytes over the configured local service boundary, never a host path.
+ClamAV is optional and disabled by default. The optional Compose profile starts the external ClamAV service with a separate signature database volume; OSINT Tools streams bytes to the configured local scanner and never executes uploaded content.
 
-AV `clean`, `detected`, `error`, `timeout`, `unavailable`, `unsupported`, and `skipped` states are evidence. Clean does not mean safe, and detection does not prove maliciousness. ClamAV signature updates are owned by the optional service; OSINT Tools never downloads or updates signatures.
+## Release and operator documentation
 
-Run the non-interactive qualification harness with `scripts/qualify.sh`. It reports each Docker, Podman, regression, persistence, and per-provider live gate as `PASS`, `FAIL`, or `SKIPPED`; live calls run only when the corresponding credential is present. Canonical CI also runs the M6.2 Chromium browser-security gate.
+See:
 
-The same OCI image is intended for Docker and Podman, amd64 and arm64, and runs as a non-root user. Persistent application data lives under `/data`.
+- `docs/INSTALL.md` — deployment and image selection
+- `docs/CONFIGURATION.md` — runtime configuration
+- `docs/UPGRADE.md` — supported upgrade procedure
+- `docs/BACKUP_RESTORE.md` — `/data` backup/restore contract
+- `docs/TROUBLESHOOTING.md` — operator diagnostics
+- `docs/DISTRIBUTION.md` — Forgejo/GitHub/Codeberg and GHCR/Docker Hub distribution model
+- `docs/M7_5_RELEASE_CANDIDATE.md` — M7.5 closure and M8 handoff
+- `ROADMAP.md` — milestone roadmap
 
-Open `http://localhost:8080/` for the browser workspace. With authentication enabled, sign in through `/login`; browser mutations use session-bound CSRF protection and server-side authorization. `OSINT_TOOLS_AUTH_ENABLED=false` is retained for trusted, network-restricted single-system deployments.
+The release path is tag-driven and fail-closed. A release tag must be exact `vMAJOR.MINOR.PATCH`, match the project version, pass canonical qualification plus M7 release gates and browser security qualification, then publish the same amd64/arm64 digest to `ghcr.io/ploos-as/osint-tools` and `ploos1/osint-tools` with SBOM/provenance metadata.
 
-See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/M4_5_SPEC.md`, `docs/M5_1_SPEC.md`, `docs/M5_2_SPEC.md`, `docs/M6_1_SPEC.md`, `docs/M6_2_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
-
-## Case access and teams
-
-New authenticated cases belong to their creator. Owners manage ACLs and ownership; editors modify analytical content; viewers read evidence and export. Global viewers remain read-only regardless of grants. Case lists and all case/target/file routes enforce access on the server. Inaccessible objects return 404.
-
-Administrators manage explicit teams and memberships at `/admin/teams`. Disabled users or teams grant no effective access; re-enabling restores applicable persisted grants. No nested teams or inferred membership is supported.
-
-Schema 9 preserves existing evidence and leaves legacy ownership unassigned. With authentication enabled, an administrator explicitly adopts/assigns legacy cases through the workspace or `POST /api/v1/cases/{id}/claim`. Native/STIX/TAXII/MISP imports are owned by the local importer and cannot restore foreign authorization state. Exports omit local owner/ACL/team policy.
-
-`OSINT_TOOLS_AUTH_ENABLED=false` retains system-local administrative behavior without fake users or ACLs. Multi-user isolation requires authentication enabled. Enterprise identity, MFA, service accounts, nested teams and custom policies are deferred.
+No `v1.0.0` tag is created by M7.5. M8 performs final v1.0 qualification and version alignment before the first stable release.
