@@ -98,6 +98,25 @@ def restore(target: Path, backup_root: Path) -> None:
     )
 
 
+def verify_restored_payload(target: Path, expected_hash: str) -> None:
+    """Verify exact restored CAS bytes from inside a read-only root helper."""
+    output = docker(
+        "run",
+        "--rm",
+        "--user",
+        "0",
+        "--entrypoint",
+        "sh",
+        "-v",
+        f"{target}:/data:ro",
+        "osint-tools:dev",
+        "-c",
+        "find /data/files -type f -exec sha256sum {} \\;",
+    )
+    hashes = {line.split()[0] for line in output.splitlines() if line.strip()}
+    assert expected_hash in hashes, "restored uploaded bytes are missing"
+
+
 def clear_container_owned_data(target: Path) -> None:
     """Remove bind-mounted content as root before host TemporaryDirectory cleanup."""
     docker(
@@ -204,10 +223,7 @@ def main() -> int:
                 restore(restored, backup_root)
                 verify_schema(restored)
                 expected_hash = hashlib.sha256(PAYLOAD).hexdigest()
-                blobs = [p for p in (restored / "files").rglob("*") if p.is_file()]
-                assert any(
-                    hashlib.sha256(path.read_bytes()).hexdigest() == expected_hash for path in blobs
-                ), "restored uploaded bytes are missing"
+                verify_restored_payload(restored, expected_hash)
 
                 base = start(name, restored)
                 admin = Client(base).login("m72admin", PASSWORD)
