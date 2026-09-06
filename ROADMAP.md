@@ -18,5 +18,6 @@
 - **M5.5 TAXII/MISP interoperability — complete:** bounded operator-configured TAXII retrieval and conservative MISP Event exchange with preview-before-import.
 - **M6.0 Authentication/RBAC/Audit — complete:** local users, secure sessions, instance-wide roles and bounded security audit events.
 - **M6.1 Case Ownership, ACLs & Teams — complete:** schema 9, explicit legacy adoption, user/team case grants, centralized role intersection, cross-user runtime qualification, migration/restart verification and documented security residuals.
-- **M4 File/Image Intelligence:** later safe parsers may add archives, EXIF and perceptual hashes without executing content.
-- **M5 Release & Polish:** richer web UI, exports, documentation, packaging, security review and release qualification.
+- **M6.2 Security Hardening — complete:** deterministic authorization-race coverage, real-browser security-flow qualification, centralized authorization regression review and documented residual risks.
+- **M7 Release Engineering & Polish:** installation/upgrade guidance, migration and backup/restore procedures, deployment examples, packaging/distribution metadata and release-documentation cleanup.
+- **M8 v1.0 Qualification:** amd64+arm64, Docker+Podman, fresh-install+upgrade, persistence/restart, security regression and final release-artifact qualification.

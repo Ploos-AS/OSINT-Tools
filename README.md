@@ -2,7 +2,7 @@
 
 Self-hosted, open-source, passive-first OSINT workbench inspired by the convenience of IT-Tools.
 
-**M6.1 Case Ownership, Per-Case ACLs & Teams (0.6.1)** adds case isolation on top of M6.0 authentication/RBAC/audit. Global role and case access are intersected; administrators have an explicit all-case override. See [M6.1 specification](docs/M6_1_SPEC.md) for APIs, migration, trust boundaries and qualification.
+**M6.2 Security Hardening (0.6.2)** hardens the M6.1 multi-user authorization boundary with deterministic authorization-race tests and real-browser security qualification. Authentication, RBAC, per-case ownership/ACLs, teams and audit are implemented; see [M6.2 specification](docs/M6_2_SPEC.md), [security review](docs/M6_2_SECURITY_REVIEW.md) and [qualification](docs/M6_2_QUALIFICATION.md).
 
 ## Run with Docker or Podman
 
@@ -41,13 +41,13 @@ ClamAV is optional and disabled by default. Enable it with `OSINT_TOOLS_CLAMAV_E
 
 AV `clean`, `detected`, `error`, `timeout`, `unavailable`, `unsupported`, and `skipped` states are evidence. Clean does not mean safe, and detection does not prove maliciousness. ClamAV signature updates are owned by the optional service; OSINT Tools never downloads or updates signatures.
 
-Run the non-interactive qualification harness with `scripts/qualify.sh`. It reports each Docker, Podman, regression, persistence, and per-provider live gate as `PASS`, `FAIL`, or `SKIPPED`; live calls run only when the corresponding credential is present.
+Run the non-interactive qualification harness with `scripts/qualify.sh`. It reports each Docker, Podman, regression, persistence, and per-provider live gate as `PASS`, `FAIL`, or `SKIPPED`; live calls run only when the corresponding credential is present. Canonical CI also runs the M6.2 Chromium browser-security gate.
 
 The same OCI image is intended for Docker and Podman, amd64 and arm64, and runs as a non-root user. Persistent application data lives under `/data`.
 
-Open `http://localhost:8080/` for the browser workspace. UI mutations are same-origin checked when a browser supplies an Origin header; authentication remains future work for local/private deployments.
+Open `http://localhost:8080/` for the browser workspace. With authentication enabled, sign in through `/login`; browser mutations use session-bound CSRF protection and server-side authorization. `OSINT_TOOLS_AUTH_ENABLED=false` is retained for trusted, network-restricted single-system deployments.
 
-See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/M4_5_SPEC.md`, `docs/M5_1_SPEC.md`, `docs/M5_2_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
+See `docs/M0_SPEC.md`, `docs/M1_SPEC.md`, `docs/M2_SPEC.md`, `docs/M3_1_SPEC.md`, `docs/M3_2_SPEC.md`, `docs/M4_1_SPEC.md`, `docs/M4_2_SPEC.md`, `docs/M4_3_SPEC.md`, `docs/M4_4_SPEC.md`, `docs/M4_5_SPEC.md`, `docs/M5_1_SPEC.md`, `docs/M5_2_SPEC.md`, `docs/M6_1_SPEC.md`, `docs/M6_2_SPEC.md`, `docs/ARCHITECTURE.md` and `ROADMAP.md`.
 
 ## Case access and teams
 
@@ -57,4 +57,4 @@ Administrators manage explicit teams and memberships at `/admin/teams`. Disabled
 
 Schema 9 preserves existing evidence and leaves legacy ownership unassigned. With authentication enabled, an administrator explicitly adopts/assigns legacy cases through the workspace or `POST /api/v1/cases/{id}/claim`. Native/STIX/TAXII/MISP imports are owned by the local importer and cannot restore foreign authorization state. Exports omit local owner/ACL/team policy.
 
-`OSINT_TOOLS_AUTH_ENABLED=false` retains system-local administrative behavior without fake users or ACLs. Multi-user isolation requires authentication enabled. Sign in through `/login` for browser mutations using the existing session-bound CSRF header; no-JavaScript browsing remains available. Enterprise identity, MFA, service accounts, nested teams and custom policies are deferred.
+`OSINT_TOOLS_AUTH_ENABLED=false` retains system-local administrative behavior without fake users or ACLs. Multi-user isolation requires authentication enabled. Enterprise identity, MFA, service accounts, nested teams and custom policies are deferred.
