@@ -17,6 +17,6 @@
 - **M5.4 Structured Intelligence Interoperability — complete:** bounded STIX 2.1 export/import with conservative mappings and provenance-preserving diagnostics.
 - **M5.5 TAXII/MISP interoperability — complete:** bounded operator-configured TAXII retrieval and conservative MISP Event exchange with preview-before-import.
 - **M6.0 Authentication/RBAC/Audit — complete:** local users, secure sessions, instance-wide roles and bounded security audit events.
-- **M6.1 Case Ownership, ACLs & Teams — implementation under qualification:** schema 9, explicit legacy adoption, user/team case grants, centralized role intersection and cross-user runtime qualification.
+- **M6.1 Case Ownership, ACLs & Teams — complete:** schema 9, explicit legacy adoption, user/team case grants, centralized role intersection, cross-user runtime qualification, migration/restart verification and documented security residuals.
 - **M4 File/Image Intelligence:** later safe parsers may add archives, EXIF and perceptual hashes without executing content.
 - **M5 Release & Polish:** richer web UI, exports, documentation, packaging, security review and release qualification.
