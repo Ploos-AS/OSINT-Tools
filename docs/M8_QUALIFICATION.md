@@ -1,6 +1,6 @@
 # M8 v1.0 Final Qualification
 
-M8 qualifies the exact source tree for the first stable `v1.0.0` release. **M8.0 defines and gates the final qualification plan; it does not create or push the release tag.**
+M8 qualifies the exact source tree for the first stable `v1.0.0` release. **M8.0 defines and gates the final qualification plan; it does **not** create or push the release tag.**
 
 ## Automated final gates
 
