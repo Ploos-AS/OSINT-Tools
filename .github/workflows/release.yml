@@ -161,15 +161,36 @@ jobs:
           EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
+
+          verify_image() {
+            local image="$1"
+            local inspect=""
+            local digest=""
+            local attempt
+            for attempt in $(seq 1 12); do
+              if inspect="$(docker buildx imagetools inspect "$image" 2>&1)"; then
+                digest="$(awk '/^Digest:/ {print $2; exit}' <<<"$inspect")"
+                if [[ "$digest" = "$EXPECTED_DIGEST" ]] && \
+                   grep -q 'Platform:.*linux/amd64' <<<"$inspect" && \
+                   grep -q 'Platform:.*linux/arm64' <<<"$inspect"; then
+                  printf '%s\n' "$digest"
+                  return 0
+                fi
+              fi
+              echo "Registry manifest not ready for $image (attempt ${attempt}/12); expected $EXPECTED_DIGEST, saw ${digest:-unavailable}" >&2
+              if [[ -n "$inspect" ]]; then
+                printf '%s\n' "$inspect" >&2
+              fi
+              sleep $((attempt * 5))
+            done
+            echo "Unable to verify $image after retries" >&2
+            return 1
+          }
+
           ghcr="${IMAGE_GHCR}:${VERSION}"
           dockerhub="${IMAGE_DOCKERHUB}:${VERSION}"
-          for image in "$ghcr" "$dockerhub"; do
-            inspect="$(docker buildx imagetools inspect "$image")"
-            grep -q 'Platform:.*linux/amd64' <<<"$inspect"
-            grep -q 'Platform:.*linux/arm64' <<<"$inspect"
-          done
-          ghcr_digest="$(docker buildx imagetools inspect "$ghcr" | awk '/^Digest:/ {print $2; exit}')"
-          dockerhub_digest="$(docker buildx imagetools inspect "$dockerhub" | awk '/^Digest:/ {print $2; exit}')"
+          ghcr_digest="$(verify_image "$ghcr")"
+          dockerhub_digest="$(verify_image "$dockerhub")"
           test "$ghcr_digest" = "$EXPECTED_DIGEST"
           test "$dockerhub_digest" = "$EXPECTED_DIGEST"
           echo "digest=$EXPECTED_DIGEST" >> "$GITHUB_OUTPUT"
