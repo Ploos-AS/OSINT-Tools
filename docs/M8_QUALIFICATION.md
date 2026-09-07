@@ -10,7 +10,15 @@ The canonical harness already exercises Docker build/runtime, persistence/restar
 
 ## M8.1 exact release-source alignment
 
-The next M8 step must align `pyproject.toml`, `osint_tools.__version__`, and `/api/v1/info` to `1.0.0`, update the canonical runtime assertion accordingly, and run the complete qualification suite on that exact commit. The current M8.0 planning commit deliberately remains pre-1.0 so a source tree is not labelled stable before the final qualification contract exists.
+M8.1 freezes the candidate source version at `1.0.0`. `pyproject.toml`,
+`osint_tools.__version__`, the HTTP server version and `/api/v1/info` must
+agree on the stable release version. The canonical runtime qualification must
+assert `1.0.0` directly.
+
+Both normal Qualification and the tag-driven Release workflow must execute the
+M8.1 exact-source gate. M8.1 does **not** create or push `v1.0.0`; the immutable
+tag remains blocked until this exact source commit has passed full qualification
+and the manual pre-tag checks below have been completed.
 
 ## Manual pre-tag gates
 

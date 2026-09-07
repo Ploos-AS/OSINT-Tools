@@ -57,7 +57,7 @@ def run(base, *, live=False, persistence=False):
     a.login('m61a')
     c=a.ok('POST','/api/v1/cases',{'name':'M61 Case A <script>alert(1)</script>','owner_user_id':b.uid},201); cid=c['id']; path=f'/api/v1/cases/{cid}'
     c2=a.ok('POST','/api/v1/cases',{'name':'M61 persistent team case'},201); p2=f'/api/v1/cases/{c2["id"]}'
-    check('version 0.6.1',lambda: truth(admin.ok('GET','/api/v1/info')['version']=='0.6.1'))
+    check('release version 1.0.0',lambda: truth(admin.ok('GET','/api/v1/info')['version']=='1.0.0'))
     check('owner on case creation',lambda: truth(c['owner_user_id']==a.uid and admin.ok('POST','/api/v1/cases',{'name':'M61 admin case'},201)['owner_user_id']==admin.uid))
     check('inaccessible case listing',lambda: truth(c['id'] not in [x['id'] for x in b.ok('GET','/api/v1/cases')] and 'M61 Case A' not in b.ok('GET','/cases').decode()))
     check('initial cross-user isolation',lambda: truth(b.call('GET',path)[0]==404 and v.call('GET',path)[0]==404 and Client(base).call('GET',path)[0]==401))

@@ -129,7 +129,7 @@ class Handler(BaseHTTPRequestHandler):
         if not t: return False
         s=STORE.get_session(token_hash(t.value)); supplied=self.headers.get("X-CSRF-Token", "")
         return bool(s and supplied and hmac.compare_digest(token_hash(supplied), s["csrf_hash"]))
-    server_version = "OSINT-Tools/0.6.1"
+    server_version = f"OSINT-Tools/{__version__}"
 
     def log_message(self, fmt, *args):
         # Do not log query strings: rejected query-only CSRF input may contain a token.
@@ -295,7 +295,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/healthz":
                 return self._json(200, {"status": "ok"})
             if parsed.path == "/api/v1/info":
-                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M6.1", "auth_enabled": AUTH_ENABLED, "bootstrap_required": AUTH_ENABLED and STORE.count_users()==0, "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
+                return self._json(200, {"name": "OSINT Tools", "version": __version__, "milestone": "M8", "auth_enabled": AUTH_ENABLED, "bootstrap_required": AUTH_ENABLED and STORE.count_users()==0, "passive_first": True, "data_dir": DATA_DIR, "storage": "sqlite", "max_upload_bytes": MAX_UPLOAD_BYTES, "archive_limits": {"max_depth": ANALYSIS_LIMITS.max_depth, "max_members": ANALYSIS_LIMITS.max_members, "max_member_bytes": ANALYSIS_LIMITS.max_member_bytes, "max_total_bytes": ANALYSIS_LIMITS.max_total_bytes, "max_ratio": ANALYSIS_LIMITS.max_ratio}, "binary_limits": BINARY_LIMITS.__dict__, "detection_limits": {"yara_timeout_seconds": DETECTION_LIMITS.yara.timeout_seconds, "yara_max_matches": DETECTION_LIMITS.yara.max_matches, "hashset_max_entries": DETECTION_LIMITS.hashset_max_entries, "similar_max_results": DETECTION_LIMITS.similar_max_results}, "av_scan_on_upload": AV_SCAN_ON_UPLOAD})
             if parsed.path == "/api/v1/auth/status": return self._json(200,{"ok":True,"result":{"enabled":AUTH_ENABLED,"bootstrap_required":AUTH_ENABLED and STORE.count_users()==0,"user":self._auth_user() if AUTH_ENABLED else None}})
             if parsed.path == "/api/v1/auth/me":
                 u=self._require_auth(); return None if u is None else self._json(200,{"ok":True,"result":{"id":u["id"],"username":u["username"],"display_name":u.get("display_name",u["username"]),"role":u["role"]}})
@@ -630,7 +630,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main() -> None:
-    print(f"OSINT Tools M6.0 listening on {HOST}:{PORT}", flush=True)
+    print(f"OSINT Tools {__version__} listening on {HOST}:{PORT}", flush=True)
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

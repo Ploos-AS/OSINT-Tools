@@ -155,11 +155,11 @@ if [ "$docker_ready" -eq 1 ]; then
     python - "$tmp_dir/info.json" <<'PY' || api_ok=0
 import json, sys
 i = json.load(open(sys.argv[1]))
-assert i["version"] == "0.6.1" and i["milestone"] == "M6.1" and i["max_upload_bytes"] == 16384
+assert i["version"] == "1.0.0" and i["milestone"] == "M8" and i["max_upload_bytes"] == 16384
 assert i["binary_limits"]["max_candidates"] == 500
 assert i["detection_limits"]["yara_timeout_seconds"] == 5
 PY
-    [ "$api_ok" -eq 1 ] && record "M6.1 runtime version" PASS "API reports 0.6.1/M6.1" || record "M6.1 runtime version" FAIL "runtime version check failed"
+    [ "$api_ok" -eq 1 ] && record "M8.1 runtime version" PASS "API reports 1.0.0/M8" || record "M8.1 runtime version" FAIL "runtime version check failed"
     curl -fsS "$base/api/v1/providers" >"$tmp_dir/providers.json" || api_ok=0
     case_code=$(curl -sS -o "$tmp_dir/case.json" -w '%{http_code}' -H 'Content-Type: application/json' -d '{"name":"qualification"}' "$base/api/v1/cases" || true)
     [ "$case_code" = 201 ] || api_ok=0

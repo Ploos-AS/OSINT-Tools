@@ -27,7 +27,7 @@ def main():
   row("M6.0 auth persistence",sa==200 and sn==200 and bn.get("result",{}).get("role")=="analyst" and sv==401 and len(au.get("result",[]))>0)
   for n,s,d in rows: print(f"{n}|{s}|{d}")
   return 0 if all(s=="PASS" for _,s,_ in rows) else 1
- anon=Client(); s,i,_=anon.call("GET","/api/v1/info"); row("M6.0 compatibility version",s==200 and i["version"]=="0.6.1")
+ anon=Client(); s,i,_=anon.call("GET","/api/v1/info"); row("M6.0 compatibility version",s==200 and i["version"]=="1.0.0")
  row("M6.0 auth enabled default",i.get("auth_enabled") is True); row("M6.0 bootstrap required",i.get("bootstrap_required") is True)
  s,b,_=anon.call("POST","/api/v1/auth/bootstrap",{"username":"admin","display_name":"Admin","password":PASSWORD},False); row("M6.0 bootstrap first admin",s==201)
  admin_id=b.get("result",{}).get("id"); s,_,_=anon.call("POST","/api/v1/auth/bootstrap",{"username":"other","password":PASSWORD},False); row("M6.0 bootstrap closed",s==409)

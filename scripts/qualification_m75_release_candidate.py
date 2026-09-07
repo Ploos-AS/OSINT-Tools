@@ -21,8 +21,8 @@ def main() -> int:
 
         if not re.fullmatch(r'\d+\.\d+\.\d+', current_version):
             raise AssertionError('current project version must be core SemVer')
-        if current_version == '1.0.0':
-            raise AssertionError('M7.5 must not prematurely set the final v1.0.0 release version')
+        if current_version == '1.0.0' and not Path('scripts/qualification_m81_release_source.py').exists():
+            raise AssertionError('final v1.0.0 version requires the M8.1 release-source handoff gate')
 
         for marker in (
             'OSINT_TOOLS_IMAGE: osint-tools:dev',

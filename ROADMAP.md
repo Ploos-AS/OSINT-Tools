@@ -20,4 +20,4 @@
 - **M6.1 Case Ownership, ACLs & Teams — complete:** schema 9, explicit legacy adoption, user/team case grants, centralized role intersection, cross-user runtime qualification, migration/restart verification and documented security residuals.
 - **M6.2 Security Hardening — complete:** deterministic authorization-race coverage, real-browser security-flow qualification, centralized authorization regression review and documented residual risks.
 - **M7 Release Engineering & Polish — complete:** installation/upgrade guidance, backup/restore qualification, tag-driven release automation, deployment/distribution contracts and release-candidate closure.
-- **M8 v1.0 Qualification — in progress:** M8.0 defines the final fail-closed qualification plan; next is exact 1.0.0 source/runtime/API alignment, full qualification on that commit, manual mirror/registry pre-tag verification, then immutable release publication.
+- **M8 v1.0 Qualification — in progress:** M8.0 final qualification plan is complete; M8.1 freezes and qualifies the exact 1.0.0 release-source candidate. The immutable v1.0.0 tag remains blocked on full CI plus manual mirror/registry pre-tag verification.
